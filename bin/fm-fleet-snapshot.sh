@@ -628,9 +628,16 @@ task_json_one() {  # <meta>
   # non-authoritative status-log/none read on a still-live task, keeps the fold's
   # open decision surfacing.
   open_decisions_tsv=$(status_open_decisions "$status_log")
+  # An `unknown` verdict is the reader reporting that it could NOT establish
+  # the state - an unresolved run attribution, or an unreadable harness. It
+  # carries a run-step/pane source because that is what it failed to read,
+  # not because it read it, so it is not the authoritative activity evidence
+  # this clearing needs. Treat it like the status-log/none reads above and
+  # keep the open decision surfacing.
   if [ "$kind" != secondmate ] && \
      { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-         && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
+         && [ "$current_state" != parked ] && [ "$current_state" != blocked ] \
+         && [ "$current_state" != unknown ]; } \
        || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
     open_decisions_tsv=""
   fi
