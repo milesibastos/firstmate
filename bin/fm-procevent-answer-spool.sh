@@ -274,6 +274,11 @@ scan_and_claim() {  # <spool> <token>
     my ($spool, $token, $max_records, $max_bytes, $max_record_bytes,
         $answer_ext, $order_ext) = @ARGV;
 
+    # A bound on the collision-suffix search below, not a real-world ceiling:
+    # reaching it means the destination directory already holds this many
+    # same-named claims under this token, which is skipped rather than risked.
+    my $MAX_COLLISION_ATTEMPTS = 1000;
+
     # Every captured byte goes through this before it is printed, so a record
     # can never introduce a newline and forge a capture line.
     sub esc {
@@ -352,7 +357,6 @@ scan_and_claim() {  # <spool> <token>
 
     my @claimed;
     my $bytes = 0;
-    my $collision = 0;
     for my $candidate (@candidates) {
       last if scalar(@claimed) >= $max_records;
       last if $bytes >= $max_bytes;
@@ -410,8 +414,18 @@ scan_and_claim() {  # <spool> <token>
       my $destdir = ($verdict eq "ok") ? "$spool/consumed" : "$spool/rejected";
       my $dest = "$destdir/$name";
       if (-e $dest || -l $dest) {
-        $collision++;
-        $dest = "$destdir/$name.$token.$collision";
+        my $free = 0;
+        for (my $i = 1; $i <= $MAX_COLLISION_ATTEMPTS; $i++) {
+          my $try = "$destdir/$name.$token.$i";
+          next if -e $try || -l $try;
+          $dest = $try;
+          $free = 1;
+          last;
+        }
+        # No free destination found: leave the record in the spool root and
+        # skip it this batch rather than risk the rename below overwriting a
+        # previously consumed or quarantined record. Nothing is ever deleted.
+        next unless $free;
       }
       # The claim. Exclusive on its source, so a racing reader loses here and
       # the record is announced exactly once.
@@ -617,7 +631,7 @@ present() {  # <mode> <result-file>
         print "label: ",   esc(defined $f->[2] ? $f->[2] : ""), "\n";
         print "mode: ",    esc(defined $f->[3] ? $f->[3] : ""), "\n";
       }
-      print "fed: the keyed-answer intake receives these lines from the runner, not from you\n";
+      print "fed: when this source is bound, the runner already passed these lines to the keyed-answer intake; when it is not bound, they are fed to nothing and appear only here\n";
       print "END KEYED ANSWERS\n";
     } else {
       print "KEYED ANSWERS: (none)\n";
