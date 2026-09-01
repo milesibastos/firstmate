@@ -20,7 +20,11 @@
 #            the ORDER carries the safety: bind first and a captured answer can
 #            never exist with nowhere to go, arm first and an answer dropped in
 #            the gap is captured against an unbound source and feeds nothing.
-#            The supported sequence is one line longer for that reason:
+#            The supported sequence starts one line earlier still, by making
+#            sure the directory exists: source identity is the resolved path,
+#            so naming one before anything has created it would be an
+#            identity for a source that does not exist.
+#              mkdir -p <spool-dir>
 #              id=$(bin/fm-procevent-answer-spool.sh source-id <spool-dir>)
 #              bin/fm-captain-hold.sh bind "$id"
 #              bin/fm-procevent-answer-spool.sh arm <spool-dir>
@@ -222,9 +226,12 @@ cmd_arm() {
   [ "$#" -eq 1 ] || usage
   case "$dir" in *$'\n'*) die "spool paths cannot contain newlines" ;; esac
   scan_interval >/dev/null
-  # Created here rather than demanded of the operator: source identity is the
-  # resolved path, so the directory must exist before it can be named, and
-  # failing arm after a successful bind would leave a binding with no source.
+  # Created here too, as a fallback rather than the primary path: the
+  # documented sequence already creates this directory before source-id ever
+  # runs, but a caller may arm directly with no prior bind at all, such as a
+  # spool that only ever carries merge orders and stays deliberately unbound,
+  # and failing arm after a successful bind would leave a binding with no
+  # source.
   if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
     (umask 077; mkdir -p "$dir") || die "cannot create the spool directory: $dir"
   fi

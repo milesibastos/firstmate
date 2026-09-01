@@ -43,9 +43,10 @@ External process-event bindings intentionally expose no answer operation and can
 `captain-hold-lifecycle` owns when a binding is required and what the keys must be.
 
 When the answers arrive as FILES an outside process drops into a local directory rather than through a review surface, arm the answer-spool adapter.
-Bind first, which is why its source id is available as its own command:
+Bind first, which is why its source id is available as its own command; make sure the directory exists before that, since source-id needs it already there and an id naming a path nothing has created would be an identity for a source that does not exist:
 
 ```sh
+mkdir -p <spool-dir>
 id=$(bin/fm-procevent-answer-spool.sh source-id <spool-dir>)
 bin/fm-captain-hold.sh bind "$id"
 bin/fm-procevent-answer-spool.sh arm <spool-dir>
