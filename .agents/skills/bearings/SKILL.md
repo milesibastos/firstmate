@@ -112,9 +112,8 @@ After handling, rebuild the board from a fresh snapshot so acted-on items leave 
 
 ### The merge-click ruling (captain-decided)
 
-A board "Merge now" answer IS the captain's explicit merge word for that one exact PR; ask no second confirmation.
-The safeguards are mandatory, not optional: resolve the PR from the task's own `state/<task-id>.meta` `pr=` record, never from board bytes; re-verify at wake time that the PR is still open and CI-green; refuse and report a red or changed PR rather than merging it; merge only through `bin/fm-pr-merge.sh`; and echo every merge in chat with the full PR URL.
-Only the exact answer value `merge` authorizes a merge; an answer carrying a freeform note is the captain's instruction text to read and act on with judgment, never an auto-merge.
+The ruling and its five mandatory safeguards are owned once, by the `process-event-sources` skill's "Acting on a captured merge order"; load it and follow that section rather than a copy here.
+One thing is specific to this board and stays here: only the exact answer value `merge` authorizes a merge, and an answer carrying a freeform note is the captain's instruction text to read and act on with judgment, never an auto-merge.
 
 ## Chat-response contract
 
