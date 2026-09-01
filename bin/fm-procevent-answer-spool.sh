@@ -246,7 +246,7 @@ cmd_arm() {
     mode=$(stat -c %a "$real" 2>/dev/null) || die "cannot read the spool directory mode: $real"
   fi
   [ "$(( 8#$mode & 8#77 ))" -eq 0 ] \
-    || die "spool directory is group- or world-accessible: $real (mode $mode) - fix with: chmod go-rwx $real"
+    || die "spool directory is group- or world-accessible: $real (mode $mode) - fix with: chmod go-rwx '$real'"
   id=$(cmd_source_id "$real") || exit 1
   "$SCRIPT_DIR/fm-procevent.sh" register answer-spool "$id" \
     -- "$SCRIPT_DIR/fm-procevent-answer-spool.sh" poll "$real" || exit 1
@@ -648,7 +648,11 @@ present() {  # <mode> <result-file>
         print "label: ",   esc(defined $f->[2] ? $f->[2] : ""), "\n";
         print "mode: ",    esc(defined $f->[3] ? $f->[3] : ""), "\n";
       }
-      print "fed: when this source is bound, the runner already passed these lines to the keyed-answer intake; when it is not bound, they are fed to nothing and appear only here\n";
+      if ($complete) {
+        print "fed: when this source is bound, the runner already passed these lines to the keyed-answer intake; when it is not bound, they are fed to nothing and appear only here\n";
+      } else {
+        print "fed: nothing - this capture is incomplete, so answers refused it entirely and these lines were never passed to the keyed-answer intake\n";
+      }
       print "END KEYED ANSWERS\n";
     } else {
       print "KEYED ANSWERS: (none)\n";

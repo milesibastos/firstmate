@@ -242,6 +242,8 @@ assert_not_contains "$(cat "$TRUNC")" 'end: ' "the truncation fixture still carr
 "$ADAPTER" answers "$TRUNC" && fail "answers reported success on a truncated capture"
 assert_contains "$("$ADAPTER" read "$TRUNC")" 'complete: no' \
   "read reports a truncated capture as incomplete"
+assert_contains "$("$ADAPTER" read "$TRUNC")" 'fed: nothing - this capture is incomplete' \
+  "read does not claim delivery for a capture answers refused as incomplete"
 "$ADAPTER" silent "$TRUNC" && fail "a truncated capture was silenced"
 pass "a truncated capture feeds nothing, reports itself incomplete, and stays announced"
 
@@ -290,9 +292,10 @@ FM_HOME="$ARM_HOME" "$ADAPTER" retire "$SPOOL" >/dev/null \
 assert_absent "$ARM_HOME/state/procevent/$ARM_ID.source" "retire dropped the registration"
 pass "arm registers without binding, warns about it, and one spool is one identity"
 
-# --- arm creates a fresh spool directory at a restrictive mode ---------------
-# The header promises mode 0700 when absent, not "whatever the caller's umask
-# allows", so this must hold even under a permissive ambient umask.
+# --- arm's own fallback mkdir is private regardless of ambient umask --------
+# arm creates the directory itself when a caller arms directly with no prior
+# mkdir step (line 239), and that fallback must not depend on the caller's
+# umask either.
 UMASK_HOME="$TMP_ROOT/umask-home"
 mkdir -p "$UMASK_HOME/state"
 FRESH_SPOOL="$TMP_ROOT/fresh-private-spool"
@@ -303,6 +306,28 @@ PE_TRACKED+=("$UMASK_HOME|$FRESH_ID")
 FRESH_MODE=$(dir_mode "$FRESH_SPOOL")
 [ "$(( 8#$FRESH_MODE & 8#77 ))" -eq 0 ] \
   || fail "arm created a spool directory readable by group or other under a permissive umask: mode $FRESH_MODE"
+pass "arm's own fallback mkdir stays private under a permissive umask"
+
+# --- the documented sequence itself yields a private directory --------------
+# Not arm's fallback: the literal three commands from the header and skill,
+# run under a permissive ambient umask, must produce a directory with no
+# group or other bits.
+SEQ_HOME="$TMP_ROOT/sequence-home"
+mkdir -p "$SEQ_HOME/state"
+SEQ_SPOOL="$TMP_ROOT/documented-sequence-spool"
+OLD_UMASK=$(umask)
+umask 022
+(umask 077; mkdir -p "$SEQ_SPOOL") \
+  || { umask "$OLD_UMASK"; fail "the documented mkdir step failed"; }
+SEQ_ID=$("$ADAPTER" source-id "$SEQ_SPOOL") \
+  || { umask "$OLD_UMASK"; fail "source-id failed against the directory the documented mkdir step just created"; }
+FM_HOME="$SEQ_HOME" "$ADAPTER" arm "$SEQ_SPOOL" >/dev/null \
+  || { umask "$OLD_UMASK"; fail "arm failed against the directory the documented sequence just created"; }
+umask "$OLD_UMASK"
+PE_TRACKED+=("$SEQ_HOME|$SEQ_ID")
+SEQ_MODE=$(dir_mode "$SEQ_SPOOL")
+[ "$(( 8#$SEQ_MODE & 8#77 ))" -eq 0 ] \
+  || fail "the documented sequence produced a directory readable by group or other: mode $SEQ_MODE"
 pass "the documented sequence yields a private directory under a permissive umask"
 
 # --- arm refuses a pre-existing group- or world-accessible spool -------------
