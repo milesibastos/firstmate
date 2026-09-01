@@ -28,7 +28,6 @@ cleanup() {
     record="$home/state/.fleet-publish-daemon"
     [ -f "$record" ] || continue
     pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$record" 2>/dev/null | head -1)
-    [ -n "$pid" ] && kill -CONT "$pid" >/dev/null 2>&1
     [ -n "$pid" ] && kill -KILL "$pid" >/dev/null 2>&1
   done
   for pid in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
@@ -405,13 +404,15 @@ pass "a daemon lock held by an unrelated live process does not suppress start's 
 # suspending mid-sleep, a slow snapshot read - is still the legitimate lock
 # holder. Stealing its lock would start a second daemon publishing
 # concurrently, defeating the very mutual exclusion the lock exists to
-# provide. Freeze a real publisher with SIGSTOP so its identity (pid, kernel
-# start time, token) is untouched but no further beat ever lands, forcing its
-# beacon stale without killing it, and confirm a second start neither steals
-# its lock nor spawns a competing daemon.
+# provide. A tick window above GRACE (but under cmd_stop's 10s signal-wait, so
+# a SIGTERM sent while the daemon is parked in that tick's sleep still lands
+# well inside the timeout) leaves the beacon genuinely stale for a few seconds
+# between beats while the daemon stays fully live and responsive - the real
+# "running-not-beating" state, not a frozen stand-in for it - so a second
+# start neither steals its lock nor spawns a competing daemon.
 seed_home "$STALE_HOME"
 printf '30\n' > "$STALE_HOME/config/fleet-snapshot-cadence"
-STALE_ENV=(FM_FLEET_PUBLISH_GRACE=2 FM_FLEET_PUBLISH_TICK_SECS=1 "${FM_TEST_START_ENV[@]}")
+STALE_ENV=(FM_FLEET_PUBLISH_GRACE=2 FM_FLEET_PUBLISH_TICK_SECS=6 "${FM_TEST_START_ENV[@]}")
 
 env "${STALE_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" start >/dev/null 2>&1 \
   || fail "the publisher did not start on the stale-beacon home"
@@ -420,31 +421,57 @@ stale_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
 [ -n "$stale_pid" ] || fail "the stale-beacon publisher recorded no pid"
 DAEMON_PIDS+=("$stale_pid")
 
-kill -STOP "$stale_pid" 2>/dev/null \
-  || fail "could not freeze the publisher in order to age its beacon"
-sleep 3
+# Past GRACE=2s but well inside the 6s tick window, so the daemon is still
+# genuinely alive and simply has not beaten again yet.
+sleep 4
 
 out=$(env FM_FLEET_PUBLISH_GRACE=2 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" status)
 case "$out" in
-  *"daemon=stopped"*) ;;
-  *)
-    kill -CONT "$stale_pid" 2>/dev/null || true
-    fail "a frozen publisher's stale beacon must read as stopped for freshness purposes, got: $out"
+  *"daemon=running-not-beating"*"beacon="*) ;;
+  *) fail "a live publisher with a stale beacon must be reported as running-not-beating with its age, got: $out" ;;
+esac
+case "$out" in
+  *"run: bin/fm-fleet-publish.sh start"*)
+    fail "a running-not-beating publisher must not carry the start-recovery hint, got: $out"
     ;;
 esac
 
-env "${STALE_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" start >/dev/null 2>&1 || true
+out=$(env "${STALE_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" start 2>&1)
+start_rc=$?
+[ "$start_rc" -ne 0 ] \
+  || fail "start must refuse to launch against a running-not-beating publisher"
+case "$out" in
+  *"could not confirm a running publisher"*)
+    fail "start's refusal must name the true reason, not a failure-to-confirm message, got: $out"
+    ;;
+esac
+case "$out" in
+  *"already running"*"has not beaten"*) ;;
+  *) fail "start's refusal must say a publisher is already running but has not beaten, got: $out" ;;
+esac
 after_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
   "$STALE_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
-kill -CONT "$stale_pid" 2>/dev/null || true
 [ "$after_pid" = "$stale_pid" ] \
   || fail "a stale beacon must not cause the daemon lock to be stolen and a second publisher started"
 kill -0 "$stale_pid" 2>/dev/null \
   || fail "the original publisher must still be alive after a second start attempt against its stale beacon"
 
+out=$(env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" stop 2>&1)
+stop_rc=$?
+[ "$stop_rc" -eq 0 ] \
+  || fail "stop must signal and stop a running-not-beating publisher, exiting 0, got exit $stop_rc: $out"
+attempts=0
+while [ "$attempts" -lt 100 ]; do
+  kill -0 "$stale_pid" 2>/dev/null || break
+  sleep 0.1
+  attempts=$(( attempts + 1 ))
+done
+kill -0 "$stale_pid" 2>/dev/null \
+  && fail "stop reported success but the running-not-beating publisher is still alive"
+
 kill -KILL "$stale_pid" >/dev/null 2>&1 || true
 wait "$stale_pid" >/dev/null 2>&1 || true
-pass "a live publisher with a stale beacon keeps its daemon lock rather than being stolen"
+pass "status, start and stop each handle a live publisher with a stale beacon correctly"
 
 # The identity a publisher records must describe the publisher, and this checks
 # that against the kernel rather than against itself. state/<home>/.fleet-publish-daemon

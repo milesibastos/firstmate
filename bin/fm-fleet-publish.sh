@@ -438,39 +438,59 @@ daemon_identity() {
   return 0
 }
 
+# daemon_state: classifies the recorded publisher into exactly one of three
+# states and prints "<pid>\t<age>" on stdout whenever a pid is known (both
+# running states; stdout is empty when stopped). The return code carries the
+# state:
+#   0  running             - identity proven, beacon fresh.
+#   1  stopped             - no record, or identity unprovable. Recoverable.
+#   2  running-not-beating - identity proven, beacon stale (e.g. the host
+#                            suspended past GRACE while the daemon slept).
+# status, start and stop all read this one function rather than each branching
+# on daemon_alive themselves, so the operator surface cannot drift out of step
+# with what the lock-steal guard in cmd_run already treats as proof of
+# identity. It is built on daemon_identity for identity and the same freshness
+# arithmetic daemon_alive used to compute, restating neither.
+daemon_state() {
+  local pid mtime now age
+  pid=$(daemon_identity) || return 1
+  mtime=$(path_mtime "$BEACON") || { printf '%s\t\n' "$pid"; return 2; }
+  case "$mtime" in ''|*[!0-9]*) printf '%s\t\n' "$pid"; return 2 ;; esac
+  now=$(now_epoch) || { printf '%s\t\n' "$pid"; return 2; }
+  case "$now" in ''|*[!0-9]*) printf '%s\t\n' "$pid"; return 2 ;; esac
+  age=$(( now - mtime ))
+  printf '%s\t%s\n' "$pid" "$age"
+  [ "$age" -le "$GRACE" ] || return 2
+  return 0
+}
+
 # daemon_alive: 0 when this home's publisher is genuinely running AND making
 # progress.
 #
 # Liveness must bind IDENTITY, not merely freshness. A pid plus a fresh beacon is
 # not proof: if the publisher dies just after a beat and the kernel hands its pid
 # to an unrelated process while that beacon is still inside the grace window, a
-# freshness-only check calls that unrelated process the publisher. The two
-# consequences are both bad - `start` reports "already running" and silently
-# declines to recover, freezing the very surface this script exists to keep
-# current, and `stop` sends SIGTERM to a process that has nothing to do with
-# firstmate. Shortening the grace window only makes that race rarer; it stays
-# wrong, so the window is not the fix. daemon_identity above proves identity;
-# only once that holds does beacon freshness answer the remaining question,
-# which is progress rather than identity. A record written before identity
-# binding existed lacks the token and start time; it is treated as unprovable
-# and therefore not alive, so recovery runs. That direction is deliberate: an
-# extra start attempt is harmless because the singleton lock admits one daemon,
-# while a false "already running" loses publication silently.
+# freshness-only check calls that unrelated process the publisher. Shortening
+# the grace window only makes that race rarer; it stays wrong, so the window is
+# not the fix. daemon_state above proves identity via daemon_identity and only
+# then answers freshness, which is progress rather than identity; daemon_alive
+# restates neither and simply narrows daemon_state to its "running" state, so
+# its own contract - and every caller that only cares whether publication is
+# actively progressing - is unchanged. A record written before identity binding
+# existed lacks the token and start time; it is treated as unprovable and
+# therefore not alive, so recovery runs. That direction is deliberate: an extra
+# start attempt is harmless because the singleton lock admits one daemon, while
+# a false "already running" loses publication silently.
 daemon_alive() {
-  local pid mtime now age
-  pid=$(daemon_identity) || return 1
-  mtime=$(path_mtime "$BEACON") || return 1
-  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
-  now=$(now_epoch) || return 1
-  case "$now" in ''|*[!0-9]*) return 1 ;; esac
-  age=$(( now - mtime ))
-  [ "$age" -le "$GRACE" ] || return 1
-  printf '%s\t%s\n' "$pid" "$age"
+  local out rc
+  out=$(daemon_state); rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  printf '%s\n' "$out"
   return 0
 }
 
 cmd_status() {
-  local cadence rc alive pid age generated now stamp artifact_age
+  local cadence rc state_out state_rc pid age generated now stamp artifact_age
   read_cadence; rc=$?
   cadence=$FLEET_PUBLISH_CADENCE
   case "$rc" in
@@ -479,13 +499,22 @@ cmd_status() {
     *) echo "publisher: misconfigured ($FLEET_PUBLISH_ERROR)" ;;
   esac
   if [ "$rc" -eq 0 ]; then
-    if alive=$(daemon_alive); then
-      pid=${alive%%$'\t'*}
-      age=${alive#*$'\t'}
-      echo "publisher: enabled cadence=${cadence}s daemon=running pid=$pid beacon=${age}s"
-    else
-      echo "publisher: enabled cadence=${cadence}s daemon=stopped (run: bin/fm-fleet-publish.sh start)"
-    fi
+    state_out=$(daemon_state); state_rc=$?
+    case "$state_rc" in
+      0)
+        pid=${state_out%%$'\t'*}
+        age=${state_out#*$'\t'}
+        echo "publisher: enabled cadence=${cadence}s daemon=running pid=$pid beacon=${age}s"
+        ;;
+      2)
+        pid=${state_out%%$'\t'*}
+        age=${state_out#*$'\t'}
+        echo "publisher: enabled cadence=${cadence}s daemon=running-not-beating pid=$pid beacon=${age}s (identified but not making progress; run: bin/fm-fleet-publish.sh stop)"
+        ;;
+      *)
+        echo "publisher: enabled cadence=${cadence}s daemon=stopped (run: bin/fm-fleet-publish.sh start)"
+        ;;
+    esac
   fi
   if generated=$(artifact_generated) && [ -n "$generated" ]; then
     artifact_age=unknown
@@ -697,8 +726,19 @@ cmd_run() {
   done
 }
 
+# start_refuse_stale <pid> <age>: the message cmd_start gives when a publisher
+# has proven its own identity but has not beaten in a while. Mutual exclusion
+# still holds - a second daemon must not be launched against a home that
+# already has one - but the reason must say what actually happened (identified,
+# stalled) instead of "could not confirm a running publisher", which describes
+# the opposite, and must name the operator's actual next step.
+start_refuse_stale() {  # <pid> <age>
+  printf 'fm-fleet-publish: a publisher (pid=%s) is already running but has not beaten in %ss; run: bin/fm-fleet-publish.sh stop to end it before starting a new one\n' \
+    "$1" "$2" >&2
+}
+
 cmd_start() {
-  local cadence rc alive pid waited attempt child_pid=
+  local cadence rc state_out state_rc pid age waited attempt child_pid=
   read_cadence; rc=$?
   cadence=$FLEET_PUBLISH_CADENCE
   if [ "$rc" -ne 0 ]; then
@@ -714,11 +754,13 @@ cmd_start() {
     printf 'fm-fleet-publish: state directory is unavailable: %s\n' "$STATE" >&2
     return 1
   fi
-  if alive=$(daemon_alive); then
-    pid=${alive%%$'\t'*}
-    echo "publisher: already running pid=$pid cadence=${cadence}s"
-    return 0
-  fi
+  state_out=$(daemon_state); state_rc=$?
+  pid=${state_out%%$'\t'*}
+  age=${state_out#*$'\t'}
+  case "$state_rc" in
+    0) echo "publisher: already running pid=$pid cadence=${cadence}s"; return 0 ;;
+    2) start_refuse_stale "$pid" "$age"; return 1 ;;
+  esac
 
   # Detached the same three ways bin/fm-startup-network.sh detaches its worker:
   # stdio to /dev/null so no caller's pipe is held open, nohup so the publisher
@@ -735,19 +777,23 @@ cmd_start() {
   attempt=0
   while [ "$attempt" -lt "$START_ATTEMPTS" ]; do
     attempt=$(( attempt + 1 ))
-    if alive=$(daemon_alive); then
-      pid=${alive%%$'\t'*}
-      echo "publisher: already running pid=$pid cadence=${cadence}s"
-      return 0
-    fi
+    state_out=$(daemon_state); state_rc=$?
+    pid=${state_out%%$'\t'*}
+    age=${state_out#*$'\t'}
+    case "$state_rc" in
+      0) echo "publisher: already running pid=$pid cadence=${cadence}s"; return 0 ;;
+      2) start_refuse_stale "$pid" "$age"; return 1 ;;
+    esac
     launch_publisher
     waited=0
     while [ "$waited" -lt "$START_WAIT" ]; do
-      if alive=$(daemon_alive); then
-        pid=${alive%%$'\t'*}
-        echo "publisher: started pid=$pid cadence=${cadence}s"
-        return 0
-      fi
+      state_out=$(daemon_state); state_rc=$?
+      pid=${state_out%%$'\t'*}
+      age=${state_out#*$'\t'}
+      case "$state_rc" in
+        0) echo "publisher: started pid=$pid cadence=${cadence}s"; return 0 ;;
+        2) start_refuse_stale "$pid" "$age"; return 1 ;;
+      esac
       # A child that has already exited will never become the publisher, so stop
       # waiting out the full window and try again.
       [ -n "$child_pid" ] && ! kill -0 "$child_pid" 2>/dev/null && break
@@ -785,7 +831,7 @@ launch_publisher() {  # sets child_pid
 }
 
 cmd_stop() {
-  local pid waited alive
+  local pid waited state_out state_rc
   pid=$(record_pid) || pid=
   if [ -z "$pid" ]; then
     echo "publisher: no publisher is recorded for this home"
@@ -796,15 +842,19 @@ cmd_stop() {
     echo "publisher: recorded publisher pid=$pid is already gone"
     return 0
   fi
-  # Signal only on the same evidence `status` reports a publisher on: a live pid
-  # AND a fresh beacon. A recorded pid alone is not proof after a reboot, and a
-  # reused pid would make this stop something that is not a publisher.
-  if ! alive=$(daemon_alive); then
-    printf 'fm-fleet-publish: recorded publisher pid=%s is not beating, so it was not signalled; inspect it and remove %s if it is not a publisher\n' \
+  # Signal on identity alone (daemon_state's running or running-not-beating),
+  # not on freshness too: the four identity facts daemon_identity proves are
+  # stronger evidence of ownership than most stop commands hold, and a
+  # publisher that is merely not beating is still this home's publisher. A
+  # recorded pid that a reboot handed to an unrelated process fails identity
+  # and is refused rather than signalled, so recycled pids stay protected.
+  state_out=$(daemon_state); state_rc=$?
+  if [ "$state_rc" -eq 1 ]; then
+    printf 'fm-fleet-publish: recorded publisher pid=%s does not prove its identity, so it was not signalled; inspect it and remove %s if it is not a publisher\n' \
       "$pid" "$DAEMON_RECORD" >&2
     return 1
   fi
-  pid=${alive%%$'\t'*}
+  pid=${state_out%%$'\t'*}
   kill -TERM "$pid" 2>/dev/null || true
   waited=0
   while [ "$waited" -lt 10 ]; do
