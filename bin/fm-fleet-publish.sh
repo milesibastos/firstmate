@@ -106,7 +106,8 @@
 #                                  a configuration change (default 5)
 #   FM_FLEET_PUBLISH_GRACE         beacon freshness allowance for the liveness
 #                                  check (default FM_FLEET_PUBLISH_TIMEOUT + 60)
-#   FM_FLEET_PUBLISH_START_WAIT    seconds `start` waits to verify (default 15)
+#   FM_FLEET_PUBLISH_START_WAIT    seconds `start` waits to verify one attempt (default 15)
+#   FM_FLEET_PUBLISH_START_ATTEMPTS  launch attempts before start gives up (default 3)
 #   FM_FLEET_PUBLISH_LOG_MAX_BYTES bounded failure log size (default 65536)
 #   FM_FLEET_PUBLISH_SNAPSHOT_CMD  test seam: the snapshot producer to run
 #                                  (default bin/fm-fleet-snapshot.sh)
@@ -133,6 +134,7 @@ MIN_CADENCE=${FM_FLEET_PUBLISH_MIN_CADENCE:-30}
 MAX_CADENCE_DIGITS=10
 TICK_SECS=${FM_FLEET_PUBLISH_TICK_SECS:-5}
 START_WAIT=${FM_FLEET_PUBLISH_START_WAIT:-15}
+START_ATTEMPTS=${FM_FLEET_PUBLISH_START_ATTEMPTS:-3}
 LOG_MAX_BYTES=${FM_FLEET_PUBLISH_LOG_MAX_BYTES:-65536}
 SNAPSHOT_CMD=${FM_FLEET_PUBLISH_SNAPSHOT_CMD:-$SCRIPT_DIR/fm-fleet-snapshot.sh}
 
@@ -140,6 +142,7 @@ case "$PUBLISH_TIMEOUT" in ''|*[!0-9]*|0) PUBLISH_TIMEOUT=120 ;; esac
 case "$MIN_CADENCE" in ''|*[!0-9]*|0) MIN_CADENCE=30 ;; esac
 case "$TICK_SECS" in ''|*[!0-9]*|0) TICK_SECS=5 ;; esac
 case "$START_WAIT" in ''|*[!0-9]*|0) START_WAIT=15 ;; esac
+case "$START_ATTEMPTS" in ''|*[!0-9]*|0) START_ATTEMPTS=3 ;; esac
 case "$LOG_MAX_BYTES" in ''|*[!0-9]*|0) LOG_MAX_BYTES=65536 ;; esac
 GRACE=${FM_FLEET_PUBLISH_GRACE:-$(( PUBLISH_TIMEOUT + 60 ))}
 case "$GRACE" in ''|*[!0-9]*|0) GRACE=$(( PUBLISH_TIMEOUT + 60 )) ;; esac
@@ -177,6 +180,28 @@ path_mtime() {
   else
     stat -c %Y "$1" 2>/dev/null
   fi
+}
+
+# proc_start_of <pid>: the kernel's start time for that pid, normalized.
+# A recycled pid gets a new start time, so this is what separates "the process
+# we recorded" from "whatever now holds that number".
+proc_start_of() {
+  ps -p "$1" -o lstart= 2>/dev/null | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'
+}
+
+# proc_is_publisher <pid>: the live process is running this script.
+proc_is_publisher() {
+  ps -p "$1" -o args= 2>/dev/null | grep -q 'fm-fleet-publish\.sh'
+}
+
+# new_instance_token: identifies one publisher INSTANCE, not one pid. Only a live
+# daemon ever writes it into the beacon, so a beacon carrying a different token
+# belongs to an instance that is gone.
+new_instance_token() {
+  local token=
+  token=$(head -c 16 /dev/urandom 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+  [ -n "$token" ] || token="${BASHPID:-$$}-$(date +%s 2>/dev/null)-${RANDOM:-0}"
+  printf '%s\n' "$token"
 }
 
 link_count() {
@@ -364,20 +389,55 @@ artifact_generated() {
 }
 
 record_pid() {
+  record_field pid
+}
+
+record_field() {  # <name>
   [ -f "$DAEMON_RECORD" ] && [ ! -L "$DAEMON_RECORD" ] || return 1
-  LC_ALL=C sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$DAEMON_RECORD" 2>/dev/null | head -1
+  LC_ALL=C sed -n "s/^$1=\\(.*\\)$/\\1/p" "$DAEMON_RECORD" 2>/dev/null | head -1
 }
 
 # daemon_alive: 0 when this home's publisher is genuinely running.
-# Two independent facts must agree: the recorded pid is alive, and the beacon it
-# touches every tick is fresh. The pid alone is not enough - a reused pid would
-# report a stopped publisher as healthy, and a surface that silently stops
-# updating is the failure this script exists to remove.
+#
+# Liveness must bind IDENTITY, not merely freshness. A pid plus a fresh beacon is
+# not proof: if the publisher dies just after a beat and the kernel hands its pid
+# to an unrelated process while that beacon is still inside the grace window, a
+# freshness-only check calls that unrelated process the publisher. The two
+# consequences are both bad - `start` reports "already running" and silently
+# declines to recover, freezing the very surface this script exists to keep
+# current, and `stop` sends SIGTERM to a process that has nothing to do with
+# firstmate. Shortening the grace window only makes that race rarer; it stays
+# wrong, so the window is not the fix.
+#
+# Four facts must therefore agree, and each rules out a different impostor:
+#   1. the recorded pid is alive                  - it exists at all;
+#   2. its kernel start time equals the recorded  - it is the SAME process, not a
+#      one, so a recycled pid cannot pass           later tenant of that number;
+#   3. it is running this script                  - it is a publisher, not an
+#                                                   unrelated program;
+#   4. the beacon carries this instance's token   - it is THIS publisher, and the
+#                                                   beacon was written by a live
+#                                                   instance rather than left
+#                                                   behind by a dead one.
+# Only then does beacon freshness answer the remaining question, which is
+# progress rather than identity. A record written before identity binding existed
+# lacks the token and start time; it is treated as unprovable and therefore not
+# alive, so recovery runs. That direction is deliberate: an extra start attempt is
+# harmless because the singleton lock admits one daemon, while a false "already
+# running" loses publication silently.
 daemon_alive() {
-  local pid mtime now age
+  local pid mtime now age recorded_token recorded_start live_start beacon_token
   pid=$(record_pid) || return 1
-  [ -n "$pid" ] || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  recorded_token=$(record_field token) || return 1
+  recorded_start=$(record_field proc_start) || return 1
+  [ -n "$recorded_token" ] && [ -n "$recorded_start" ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
+  live_start=$(proc_start_of "$pid")
+  [ -n "$live_start" ] && [ "$live_start" = "$recorded_start" ] || return 1
+  proc_is_publisher "$pid" || return 1
+  beacon_token=$(head -n 1 "$BEACON" 2>/dev/null || true)
+  [ "$beacon_token" = "$recorded_token" ] || return 1
   mtime=$(path_mtime "$BEACON") || return 1
   case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
   now=$(now_epoch) || return 1
@@ -444,12 +504,29 @@ daemon_cleanup() {
   fi
 }
 
+# The beacon carries the live instance's token, so it is evidence of WHO is
+# beating and not only of WHEN. A dead instance's beacon can still be recent, but
+# it can never carry a later instance's token.
+FLEET_PUBLISH_TOKEN=
+
+# The beat is published by rename, never by truncating the beacon in place.
+# A plain redirect empties the file before it refills it, and a reader landing in
+# that window sees no token and concludes the publisher is gone - which would
+# make a healthy publisher intermittently unrecoverable and intermittently
+# unstoppable. The rename also carries the mtime the freshness check reads.
 beat() {
-  : > "$BEACON" 2>/dev/null || true
+  local tmp
+  tmp=$(umask 077; mktemp "$STATE/.fleet-publish-beat.XXXXXX" 2>/dev/null) || return 0
+  if printf '%s\n' "$FLEET_PUBLISH_TOKEN" > "$tmp" 2>/dev/null; then
+    mv -f -- "$tmp" "$BEACON" 2>/dev/null || rm -f -- "$tmp" 2>/dev/null || true
+  else
+    rm -f -- "$tmp" 2>/dev/null || true
+  fi
+  return 0
 }
 
 cmd_run() {
-  local cadence rc slept slice
+  local cadence rc slept slice record_tmp config_failures=0
   if ! mkdir -p "$STATE" 2>/dev/null; then
     printf 'fm-fleet-publish: state directory is unavailable: %s\n' "$STATE" >&2
     return 1
@@ -473,10 +550,23 @@ cmd_run() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  # Identity is recorded BEFORE the first beat, so a reader never sees a beacon
+  # it cannot attribute to a recorded instance.
+  FLEET_PUBLISH_TOKEN=$(new_instance_token)
+  # Published by rename for the same reason the beacon is: a reader that catches
+  # a truncate-then-write half-finished sees a record with no token and concludes
+  # the publisher is not provable, which would make a healthy daemon read as dead.
+  record_tmp=$(umask 077; mktemp "$STATE/.fleet-publish-daemon.XXXXXX" 2>/dev/null) || record_tmp=
+  if [ -n "$record_tmp" ] \
+    && printf 'pid=%s\nproc_start=%s\ntoken=%s\nstarted=%s\ncadence=%s\n' \
+      "${BASHPID:-$$}" "$(proc_start_of "${BASHPID:-$$}")" "$FLEET_PUBLISH_TOKEN" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" "$cadence" > "$record_tmp" 2>/dev/null
+  then
+    mv -f -- "$record_tmp" "$DAEMON_RECORD" 2>/dev/null || rm -f -- "$record_tmp" 2>/dev/null || true
+  else
+    [ -z "$record_tmp" ] || rm -f -- "$record_tmp" 2>/dev/null || true
+  fi
   beat
-  printf 'pid=%s\nstarted=%s\ncadence=%s\n' \
-    "${BASHPID:-$$}" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" "$cadence" \
-    > "$DAEMON_RECORD" 2>/dev/null || true
 
   while :; do
     beat
@@ -496,21 +586,31 @@ cmd_run() {
       slept=$(( slept + slice ))
       beat
       read_cadence; rc=$?
-      cadence=$FLEET_PUBLISH_CADENCE
-      if [ "$rc" -ne 0 ]; then
-        if [ "$rc" -eq 1 ]; then
-          log_failure "cadence configuration was removed; the publisher stopped and left the last published snapshot in place"
-        else
-          log_failure "cadence configuration became unusable ($FLEET_PUBLISH_ERROR); the publisher stopped and left the last published snapshot in place"
+      if [ "$rc" -eq 0 ]; then
+        cadence=$FLEET_PUBLISH_CADENCE
+        config_failures=0
+      else
+        # One unreadable moment is not a decision. A loaded or momentarily
+        # unavailable filesystem must not be able to retire a publisher that the
+        # home still wants, so stopping requires the configuration to still be
+        # gone or unusable on a second consecutive look. A genuinely removed
+        # file reads the same way twice and still stops within a tick.
+        config_failures=$(( config_failures + 1 ))
+        if [ "$config_failures" -ge 2 ]; then
+          if [ "$rc" -eq 1 ]; then
+            log_failure "cadence configuration was removed; the publisher stopped and left the last published snapshot in place"
+          else
+            log_failure "cadence configuration became unusable ($FLEET_PUBLISH_ERROR); the publisher stopped and left the last published snapshot in place"
+          fi
+          return 0
         fi
-        return 0
       fi
     done
   done
 }
 
 cmd_start() {
-  local cadence rc alive pid waited monitor_was_on
+  local cadence rc alive pid waited attempt child_pid=
   read_cadence; rc=$?
   cadence=$FLEET_PUBLISH_CADENCE
   if [ "$rc" -ne 0 ]; then
@@ -538,6 +638,42 @@ cmd_start() {
   # caller's group teardown cannot take the publisher down with it. Together
   # those are what let the artifact keep advancing after the agent that armed it
   # is gone.
+  # Launching is retried rather than attempted once. A publisher that is still
+  # dying holds the singleton lock for a moment, so a child launched into that
+  # window loses the race and exits; giving up there would leave a home that
+  # asked for a cadence with no publisher, which is the silent-freeze failure
+  # this script exists to prevent. Each attempt re-checks whether some other
+  # start won in the meantime, so retrying can never produce a second daemon.
+  attempt=0
+  while [ "$attempt" -lt "$START_ATTEMPTS" ]; do
+    attempt=$(( attempt + 1 ))
+    if alive=$(daemon_alive); then
+      pid=${alive%%$'\t'*}
+      echo "publisher: already running pid=$pid cadence=${cadence}s"
+      return 0
+    fi
+    launch_publisher
+    waited=0
+    while [ "$waited" -lt "$START_WAIT" ]; do
+      if alive=$(daemon_alive); then
+        pid=${alive%%$'\t'*}
+        echo "publisher: started pid=$pid cadence=${cadence}s"
+        return 0
+      fi
+      # A child that has already exited will never become the publisher, so stop
+      # waiting out the full window and try again.
+      [ -n "$child_pid" ] && ! kill -0 "$child_pid" 2>/dev/null && break
+      sleep 1
+      waited=$(( waited + 1 ))
+    done
+  done
+  printf 'fm-fleet-publish: could not confirm a running publisher after %s attempt(s)\n' \
+    "$START_ATTEMPTS" >&2
+  return 1
+}
+
+launch_publisher() {  # sets child_pid
+  local monitor_was_on
   monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
@@ -556,20 +692,8 @@ cmd_start() {
     FM_FLEET_PUBLISH_LOG_MAX_BYTES="$LOG_MAX_BYTES" \
     "$SCRIPT_DIR/fm-fleet-publish.sh" run \
     >/dev/null 2>&1 </dev/null &
+  child_pid=$!
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
-
-  waited=0
-  while [ "$waited" -lt "$START_WAIT" ]; do
-    if alive=$(daemon_alive); then
-      pid=${alive%%$'\t'*}
-      echo "publisher: started pid=$pid cadence=${cadence}s"
-      return 0
-    fi
-    sleep 1
-    waited=$(( waited + 1 ))
-  done
-  printf 'fm-fleet-publish: could not confirm a running publisher within %ss\n' "$START_WAIT" >&2
-  return 1
 }
 
 cmd_stop() {

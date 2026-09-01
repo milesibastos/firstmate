@@ -14,11 +14,12 @@ TMP_ROOT=$(fm_test_tmproot fm-fleet-publish)
 HOME_DIR="$TMP_ROOT/publish-home"
 STUB_HOME="$TMP_ROOT/stub-home"
 BOOT_HOME="$TMP_ROOT/boot-home"
+REUSE_HOME="$TMP_ROOT/reuse-home"
 DAEMON_PIDS=()
 
 cleanup() {
   local record pid home
-  for home in "$HOME_DIR" "$STUB_HOME" "$BOOT_HOME"; do
+  for home in "$HOME_DIR" "$STUB_HOME" "$BOOT_HOME" "$REUSE_HOME"; do
     record="$home/state/.fleet-publish-daemon"
     [ -f "$record" ] || continue
     pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$record" 2>/dev/null | head -1)
@@ -52,10 +53,18 @@ EOF
 seed_home "$HOME_DIR"
 seed_home "$STUB_HOME"
 
+# A loaded machine must not turn a correct publisher into a failed assertion, so
+# every start in this file gets an explicit, generous confirmation budget rather
+# than the production default tuned for an idle host.
+FM_TEST_START_ENV=(
+  FM_FLEET_PUBLISH_START_WAIT=45
+  FM_FLEET_PUBLISH_START_ATTEMPTS=5
+)
+
 run_publish() {  # <home> [env assignments handled by caller] <args...>
   local home=$1
   shift
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$PUBLISH" "$@"
+  env "${FM_TEST_START_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$PUBLISH" "$@"
 }
 
 # --- 1. the disabled default ------------------------------------------------
@@ -180,12 +189,12 @@ FAIL_FLAG="$TMP_ROOT/stub-fail"
 printf '1\n' > "$STUB_HOME/config/fleet-snapshot-cadence"
 
 run_stub() {  # <args...>
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STUB_HOME" \
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STUB_HOME" \
     FM_TEST_SEQ_FILE="$SEQ_FILE" FM_TEST_FAIL_FLAG="$FAIL_FLAG" \
     FM_FLEET_PUBLISH_SNAPSHOT_CMD="$STUB" \
     FM_FLEET_PUBLISH_MIN_CADENCE=1 \
     FM_FLEET_PUBLISH_TICK_SECS=1 \
-    FM_FLEET_PUBLISH_START_WAIT=30 \
+    "${FM_TEST_START_ENV[@]}" \
     "$PUBLISH" "$@"
 }
 
@@ -194,7 +203,7 @@ artifact_marker() {  # <home>
 }
 
 wait_for_marker_beyond() {  # <home> <marker> [attempts]
-  local home=$1 base=$2 attempts=${3:-300} i=0 got
+  local home=$1 base=$2 attempts=${3:-900} i=0 got
   while [ "$i" -lt "$attempts" ]; do
     got=$(artifact_marker "$home")
     case "$got" in
@@ -289,6 +298,58 @@ kill -KILL "$DECOY_PID" >/dev/null 2>&1 || true
 wait "$DECOY_PID" >/dev/null 2>&1 || true
 DECOY_PID=
 pass "stop refuses a recorded pid that is not beating instead of signalling it"
+
+# A FRESH beacon plus a recycled pid is the dangerous case, and it is not the one
+# above: there the beacon was stale, so freshness alone still refused. Here the
+# publisher died immediately after a beat and the kernel handed its pid to an
+# unrelated process while that beacon is still inside the grace window. A
+# liveness check that binds only freshness accepts that process as the publisher,
+# which both suppresses recovery (start reports "already running" and publishes
+# nothing further) and points stop's SIGTERM at a program that has nothing to do
+# with firstmate. Identity must be bound, because a shorter grace window would
+# only make this rarer.
+DECOY_PID=
+( exec -a fm-fleet-publish-bystander sleep 120 ) >/dev/null 2>&1 &
+DECOY_PID=$!
+DAEMON_PIDS+=("$DECOY_PID")
+REUSE_HOME="$TMP_ROOT/reuse-home"
+seed_home "$REUSE_HOME"
+printf '30\n' > "$REUSE_HOME/config/fleet-snapshot-cadence"
+# The dead publisher's own record and a beacon it wrote moments before dying.
+printf 'pid=%s\nproc_start=%s\ntoken=%s\nstarted=seeded\ncadence=30\n' \
+  "$DECOY_PID" "$(ps -p "$DECOY_PID" -o lstart= | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')" \
+  dead-instance-token > "$REUSE_HOME/state/.fleet-publish-daemon"
+printf 'dead-instance-token\n' > "$REUSE_HOME/state/.fleet-publish-beat"
+
+out=$(env "${FM_TEST_START_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REUSE_HOME" "$PUBLISH" status)
+case "$out" in
+  *"daemon=running"*)
+    fail "a recycled pid with a fresh beacon must not be reported as a running publisher: $out"
+    ;;
+esac
+
+# Recovery must not be suppressed: start has to produce a real publisher.
+env "${FM_TEST_START_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REUSE_HOME" "$PUBLISH" start >/dev/null 2>&1 \
+  || fail "start must recover rather than mistake a recycled pid for the publisher"
+reuse_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
+  "$REUSE_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
+[ -n "$reuse_pid" ] || fail "recovery recorded no publisher pid"
+DAEMON_PIDS+=("$reuse_pid")
+[ "$reuse_pid" != "$DECOY_PID" ] \
+  || fail "start adopted the unrelated process instead of starting a publisher"
+kill -0 "$reuse_pid" 2>/dev/null || fail "the recovered publisher is not running"
+
+# And the unrelated process must never have been signalled.
+kill -0 "$DECOY_PID" 2>/dev/null \
+  || fail "an unrelated process holding a recycled pid was signalled"
+env "${FM_TEST_START_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REUSE_HOME" "$PUBLISH" stop >/dev/null 2>&1 || true
+kill -0 "$DECOY_PID" 2>/dev/null \
+  || fail "stop signalled the unrelated process holding the recycled pid"
+kill -KILL "$DECOY_PID" >/dev/null 2>&1 || true
+wait "$DECOY_PID" >/dev/null 2>&1 || true
+DECOY_PID=
+pass "a recycled pid with a fresh beacon is not mistaken for the publisher"
+
 
 # --- 3. a failed producer leaves the previous snapshot intact ---------------
 #
@@ -444,7 +505,7 @@ pass "a publish is atomic: a reader sees the previous whole snapshot or the next
 
 seed_home "$BOOT_HOME"
 run_bootstrap() {
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BOOT_HOME" FM_BOOTSTRAP_NETWORK=skip \
+  env "${FM_TEST_START_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BOOT_HOME" FM_BOOTSTRAP_NETWORK=skip \
     "$ROOT/bin/fm-bootstrap.sh" check 2>&1
 }
 
