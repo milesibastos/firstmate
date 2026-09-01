@@ -1102,6 +1102,287 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# Acquire <lockdir> in a live background process and wait until it is holding.
+# Sets LOCK_HOLD_PID (the wrapper) and LOCK_HOLD_LOCKPID (the recorded holder).
+#
+# The held script deliberately ends in a builtin. Bash replaces itself with the
+# final SIMPLE command of a -c script (verified: `bash -c ': ; x=1; sleep 5'`
+# reports "sleep 5" as its command), which would rewrite the holder's cmdline
+# mid-hold and make it fail its own identity check for reasons that have
+# nothing to do with what these cases assert.
+lock_hold_start() {  # <state> <lockdir> <holder-file> [ps-fake-bin] [proc-root]
+  local state=$1 lockdir=$2 holder_file=$3 fakebin=${4:-} proc_root=${5:-} i
+  LOCK_HOLD_PID=
+  LOCK_HOLD_LOCKPID=
+  : > "$holder_file"
+  PATH="${fakebin:+$fakebin:}$PATH" \
+  FM_PROC_ROOT_OVERRIDE="${proc_root:-${FM_PROC_ROOT_OVERRIDE:-/proc}}" \
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 15
+    exit 0
+  ' _ "$LIB" "$lockdir" "$holder_file" >/dev/null 2>&1 &
+  LOCK_HOLD_PID=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || return 1
+  LOCK_HOLD_LOCKPID=$(cat "$holder_file")
+  [ -n "$LOCK_HOLD_LOCKPID" ]
+}
+
+lock_hold_stop() {
+  [ -n "${LOCK_HOLD_PID:-}" ] || return 0
+  kill "$LOCK_HOLD_PID" 2>/dev/null || true
+  wait "$LOCK_HOLD_PID" 2>/dev/null || true
+  LOCK_HOLD_PID=
+}
+
+# Run one fm_lock_try_acquire and report its verdict, the holder it saw, and the
+# evidence behind that verdict.
+lock_acquire_probe() {  # <state> <lockdir> [ps-fake-bin] [proc-root]
+  local state=$1 lockdir=$2 fakebin=${3:-} proc_root=${4:-}
+  PATH="${fakebin:+$fakebin:}$PATH" \
+  FM_PROC_ROOT_OVERRIDE="${proc_root:-${FM_PROC_ROOT_OVERRIDE:-/proc}}" \
+  FM_LOCK_STALE_AFTER=0 FM_GUARD_GRACE=1 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s proof=%s recovered=%s lockpid=%s\n" \
+      "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_HOLDER_PROOF:-}" \
+      "${FM_LOCK_RECOVERED_PID:-}" "$(cat "$2/pid" 2>/dev/null || true)"
+    exit 0
+  ' _ "$LIB" "$lockdir"
+}
+
+# A ps that always fails, for the case where NO identity fact can be computed.
+write_failing_ps() {  # <bindir>
+  local bindir=$1
+  mkdir -p "$bindir"
+  cat > "$bindir/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$bindir/ps"
+}
+
+test_lock_records_holder_identity() {
+  local dir state lockdir holder recorded computed
+  dir=$(make_case lock-records-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder="$dir/holder"
+  lock_hold_start "$state" "$lockdir" "$holder" || fail "background lock holder did not start"
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  computed=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$LOCK_HOLD_LOCKPID" 2>/dev/null || true)
+  lock_hold_stop
+  [ -n "$recorded" ] || fail "acquisition recorded no holder identity"
+  [ "$recorded" = "$computed" ] \
+    || fail "recorded identity is not this holder's identity (recorded '$recorded', computed '$computed')"
+  # What is actually PROVABLE differs by platform, and both forms are a real
+  # identity, never a liveness restatement: a Linux-compatible /proc supplies
+  # the kernel's boot-relative start ticks plus the full NUL-separated cmdline,
+  # while the portable fallback supplies ps's whole-second lstart plus the
+  # rendered command. The coarser fallback is still start-time-plus-command.
+  if [ -r "/proc/$LOCK_HOLD_LOCKPID/stat" ] && [ -r "/proc/$LOCK_HOLD_LOCKPID/cmdline" ]; then
+    case "$recorded" in
+      *starttime=*" cmdline-hex="*) ;;
+      *) fail "/proc host recorded a non-/proc identity ('$recorded')" ;;
+    esac
+  else
+    case "$recorded" in
+      *[0-9]*[!0-9]*) ;;
+      *) fail "portable fallback recorded no lstart/command identity ('$recorded')" ;;
+    esac
+  fi
+  pass "lock acquisition records the holder's identity, not just its pid"
+}
+
+test_lock_live_holder_is_not_stolen_when_idle() {
+  local dir state lockdir holder out owner
+  dir=$(make_case lock-idle-holder)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder="$dir/holder"
+  lock_hold_start "$state" "$lockdir" "$holder" || fail "background lock holder did not start"
+  # Quiet is not absent. Age every freshness input the surrounding machinery
+  # has - the lock itself, its owner directory, and the watcher beacon - and
+  # squeeze both staleness knobs to their most hostile values. An identity test
+  # that consulted any of them would evict this perfectly correct holder.
+  : > "$state/.last-watcher-beat"
+  owner=$(readlink "$lockdir" 2>/dev/null || true)
+  touch -h -t 200001010000 "$lockdir" 2>/dev/null || true
+  [ -z "$owner" ] || touch -t 200001010000 "$owner" 2>/dev/null || true
+  touch -t 200001010000 "$state/.last-watcher-beat" 2>/dev/null || true
+  out=$(lock_acquire_probe "$state" "$lockdir")
+  lock_hold_stop
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a live but long-idle holder had its lock stolen: $out" ;;
+  esac
+  case "$out" in
+    *"held=$LOCK_HOLD_LOCKPID"*) ;;
+    *) fail "live idle holder not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  case "$out" in
+    *"proof=identity"*) ;;
+    *) fail "live idle holder was kept for a reason other than proven identity: $out" ;;
+  esac
+  case "$out" in
+    *"lockpid=$LOCK_HOLD_LOCKPID"*) ;;
+    *) fail "live idle holder's lock pid was clobbered: $out" ;;
+  esac
+  pass "a live holder that has been idle for a long time is still the holder"
+}
+
+test_lock_recycled_pid_does_not_read_as_holder() {
+  local dir state lockdir proc_root live identity same_identity reused
+  dir=$(make_case lock-recycled-pid)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  proc_root="$dir/proc"
+  # A REAL live process, so the liveness check this replaces still passes, with
+  # a synthetic /proc entry so the identity fact can be moved deterministically
+  # on hosts that have no /proc of their own.
+  sleep 30 &
+  live=$!
+  mkdir -p "$proc_root"
+  write_fake_proc_identity "$proc_root" "$live" 987654
+  identity=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not compute the fake holder identity"
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "$identity" > "$lockdir/pid-identity"
+
+  # Control: nothing about the process has changed, so the lock stays held.
+  same_identity=$(lock_acquire_probe "$state" "$lockdir" "" "$proc_root")
+  # Now recycle the pid: same number, different process. This is the ONLY fact
+  # that changes between the two probes.
+  write_fake_proc_identity "$proc_root" "$live" 987655
+  reused=$(lock_acquire_probe "$state" "$lockdir" "" "$proc_root")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  # Verdicts first, evidence second: the two verdicts are what a pid-liveness
+  # check cannot tell apart, and they must diverge on the identity fact alone.
+  case "$same_identity" in
+    *"rc=1"*) ;;
+    *) fail "unchanged holder identity did not keep the lock held: $same_identity" ;;
+  esac
+  case "$reused" in
+    *"rc=0"*) ;;
+    *) fail "a recycled pid still read as the lock holder and suppressed recovery: $reused" ;;
+  esac
+  case "$reused" in
+    *"recovered=$live"*) ;;
+    *) fail "reclaim did not report the abandoned holder pid: $reused" ;;
+  esac
+  case "$same_identity" in
+    *"proof=identity"*) ;;
+    *) fail "unchanged holder was kept for a reason other than proven identity: $same_identity" ;;
+  esac
+  case "$reused" in
+    *"proof=mismatch"*) ;;
+    *) fail "recycled pid was reclaimed for a reason other than an identity mismatch: $reused" ;;
+  esac
+  pass "a recycled pid does not read as the lock holder"
+}
+
+test_lock_stale_record_with_identity_and_no_process_is_reclaimed() {
+  local dir state lockdir dead out
+  dir=$(make_case lock-stale-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf 'proc-starttime=1 cmdline-hex=00\n' > "$lockdir/pid-identity"
+  out=$(lock_acquire_probe "$state" "$lockdir")
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "a stale record whose process is gone was not reclaimed: $out" ;;
+  esac
+  case "$out" in
+    *"proof=dead"*) ;;
+    *) fail "vanished holder was not reported as dead: $out" ;;
+  esac
+  pass "a recorded holder with no process left is reclaimed"
+}
+
+test_lock_unprovable_identity_is_not_stolen() {
+  local dir state lockdir holder fakebin no_proc probe out
+  dir=$(make_case lock-unprovable-identity)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder="$dir/holder"
+  fakebin="$dir/fakebin"
+  no_proc="$dir/no-proc"
+  write_failing_ps "$fakebin"
+  lock_hold_start "$state" "$lockdir" "$holder" || fail "background lock holder did not start"
+  [ -s "$lockdir/pid-identity" ] || { lock_hold_stop; fail "holder recorded no identity to re-prove"; }
+  # Assert the divergence rather than assuming it: under this fixture the
+  # identity genuinely cannot be recomputed, so the case cannot go vacuous.
+  probe=$(PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$no_proc" \
+    bash -c '. "$1"; if fm_pid_identity "$2" >/dev/null 2>&1; then echo computable; else echo uncomputable; fi' \
+    _ "$LIB" "$LOCK_HOLD_LOCKPID")
+  out=$(lock_acquire_probe "$state" "$lockdir" "$fakebin" "$no_proc")
+  lock_hold_stop
+  [ "$probe" = uncomputable ] \
+    || fail "identity fixture did not actually remove the identity facts (got '$probe')"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a holder whose identity could not be re-proved had its lock stolen: $out" ;;
+  esac
+  case "$out" in
+    *"proof=unprovable"*) ;;
+    *) fail "unprovable identity was silently reported as something else: $out" ;;
+  esac
+  pass "an identity that cannot be re-proved keeps the lock with the holder"
+}
+
+test_lock_without_recorded_identity_is_not_stolen() {
+  local dir state lockdir legacy_lock holder fakebin no_proc live out legacy
+  dir=$(make_case lock-no-identity)
+  state="$dir/state"
+  legacy_lock="$state/.legacy.lock"
+  lockdir="$state/.contend.lock"
+  holder="$dir/holder"
+  fakebin="$dir/fakebin"
+  no_proc="$dir/no-proc"
+
+  # A lock taken by an older build records a pid and nothing else.
+  sleep 30 &
+  live=$!
+  mkdir "$legacy_lock"
+  printf '%s\n' "$live" > "$legacy_lock/pid"
+  legacy=$(lock_acquire_probe "$state" "$legacy_lock")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  case "$legacy" in
+    *"rc=1"*"proof=liveness-only"*) ;;
+    *) fail "a live pre-identity lock was not kept with its holder: $legacy" ;;
+  esac
+
+  # A host where no identity fact exists at all still locks, still refuses to
+  # steal, and says which evidence it had - it does not quietly answer the
+  # liveness question and call it identity.
+  write_failing_ps "$fakebin"
+  lock_hold_start "$state" "$lockdir" "$holder" "$fakebin" "$no_proc" \
+    || fail "lock holder did not start where no identity fact is available"
+  [ ! -s "$lockdir/pid-identity" ] \
+    || { lock_hold_stop; fail "an unidentifiable host recorded an identity anyway"; }
+  out=$(lock_acquire_probe "$state" "$lockdir")
+  lock_hold_stop
+  case "$out" in
+    *"rc=1"*"proof=liveness-only"*) ;;
+    *) fail "a holder on a host with no identity facts was not kept: $out" ;;
+  esac
+  pass "a lock with no recorded identity is never stolen, and says so"
+}
+
 test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
@@ -1115,6 +1396,12 @@ test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
+test_lock_records_holder_identity
+test_lock_live_holder_is_not_stolen_when_idle
+test_lock_recycled_pid_does_not_read_as_holder
+test_lock_stale_record_with_identity_and_no_process_is_reclaimed
+test_lock_unprovable_identity_is_not_stolen
+test_lock_without_recorded_identity_is_not_stolen
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
