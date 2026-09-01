@@ -1,0 +1,124 @@
+launched snapshot pid=83038
+=== process tree BEFORE abort (descendants of 83038) ===
+descendant pids: 84510
+84507
+84508
+84509
+84278
+84262
+84267
+84269
+84256
+84257
+84264
+84250
+84254
+84255
+84249
+84263
+83736
+83721
+83724
+83713
+83679
+83692
+83697
+83715
+83701
+83676
+83663
+83681
+83656
+83675
+83677
+83696
+83144
+83145
+83146
+83149
+83038
+  PID  PGID  PPID STAT COMMAND
+84510 84278 84278 S    sleep 5
+  PID  PGID  PPID STAT COMMAND
+84507 84267 84267 S    sleep 5
+  PID  PGID  PPID STAT COMMAND
+84508 84262 84262 S    sleep 5
+  PID  PGID  PPID STAT COMMAND
+84509 84269 84269 S    sleep 5
+  PID  PGID  PPID STAT COMMAND
+84278 84278 84264 S    bash /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/fakebin/no-mistakes axi status
+  PID  PGID  PPID STAT COMMAND
+84262 84262 84250 S    bash /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/fakebin/no-mistakes axi status
+  PID  PGID  PPID STAT COMMAND
+84267 84267 84257 S    bash /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/fakebin/no-mistakes axi status
+  PID  PGID  PPID STAT COMMAND
+84269 84269 84256 S    bash /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/fakebin/no-mistakes axi status
+  PID  PGID  PPID STAT COMMAND
+84256 83724 84254 S    perl -e my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8) 10 no-mistakes axi status
+  PID  PGID  PPID STAT COMMAND
+84257 83721 84255 S    perl -e my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8) 10 no-mistakes axi status
+  PID  PGID  PPID STAT COMMAND
+84264 83736 84263 S    perl -e my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8) 10 no-mistakes axi status
+  PID  PGID  PPID STAT COMMAND
+84250 83713 84249 S    perl -e my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8) 10 no-mistakes axi status
+  PID  PGID  PPID STAT COMMAND
+84254 83724 83724 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task3
+  PID  PGID  PPID STAT COMMAND
+84255 83721 83721 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task1
+  PID  PGID  PPID STAT COMMAND
+84249 83713 83713 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task2
+  PID  PGID  PPID STAT COMMAND
+84263 83736 83736 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task4
+  PID  PGID  PPID STAT COMMAND
+83736 83736 83715 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task4
+  PID  PGID  PPID STAT COMMAND
+83721 83721 83692 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task1
+  PID  PGID  PPID STAT COMMAND
+83724 83724 83697 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task3
+  PID  PGID  PPID STAT COMMAND
+83713 83713 83679 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task2
+  PID  PGID  PPID STAT COMMAND
+83679 83145 83663 S    perl -e my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8) 10 env FM_ROOT_OVERRIDE=/Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ FM_HOME=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel FM_STATE_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/state FM_DATA_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/data FM_PROJECTS_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/projects FM_CONFIG_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/config /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task2
+  PID  PGID  PPID STAT COMMAND
+83692 83144 83676 S    perl -e my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8) 10 env FM_ROOT_OVERRIDE=/Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ FM_HOME=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel FM_STATE_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/state FM_DATA_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/data FM_PROJECTS_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/projects FM_CONFIG_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/config /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task1
+  PID  PGID  PPID STAT COMMAND
+83697 83146 83681 S    perl -e my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8) 10 env FM_ROOT_OVERRIDE=/Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ FM_HOME=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel FM_STATE_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/state FM_DATA_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/data FM_PROJECTS_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/projects FM_CONFIG_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/config /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task3
+  PID  PGID  PPID STAT COMMAND
+83715 83149 83701 S    perl -e my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8) 10 env FM_ROOT_OVERRIDE=/Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ FM_HOME=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel FM_STATE_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/state FM_DATA_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/data FM_PROJECTS_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/projects FM_CONFIG_OVERRIDE=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-cancel-repro.DtKqHf/cancel/config /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-crew-state.sh task4
+  PID  PGID  PPID STAT COMMAND
+83701 83149 83696 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83676 83144 83675 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83663 83145 83656 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83681 83146 83677 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83656 83145 83145 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83675 83144 83144 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83677 83146 83146 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83696 83149 83149 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83144 83144 83038 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83145 83145 83038 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83146 83146 83038 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83149 83149 83038 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+  PID  PGID  PPID STAT COMMAND
+83038 81007 81058 S    bash /Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1FCT8YWJR33QDJFMGVQP9QQ/bin/fm-fleet-snapshot.sh --json
+trace log so far:
+PID 84267 PGID 84267 starting sleep
+PID 84262 PGID 84262 starting sleep
+PID 84278 PGID 84278 starting sleep
+PID 84269 PGID 84269 starting sleep
+=== sending SIGTERM to snapshot pid 83038 (pid only, not group) ===
+=== process tree AFTER abort + grace (should be empty) ===
+NONE - all descendant pids are gone
+snapshot pid 83038 is gone
+completed markers (reads that finished, whether before or after abort):
+0

@@ -1,0 +1,7 @@
+=== 8 tasks, each task's status read takes 1s ===
+--- Serial (FM_SNAPSHOT_TASK_CONCURRENCY=1) ---
+elapsed: 15.014193000s
+schema/task-count OK
+--- Parallel (FM_SNAPSHOT_TASK_CONCURRENCY=8, default) ---
+elapsed: 2.953003000s
+schema/task-count OK
