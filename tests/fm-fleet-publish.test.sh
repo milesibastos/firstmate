@@ -23,6 +23,7 @@ DAEMON_PIDS=()
 
 cleanup() {
   local record pid home
+  chmod 755 "$STALE_HOME/state" >/dev/null 2>&1 || true
   chmod 755 "$BEAT_HOME/state" >/dev/null 2>&1 || true
   for home in "$HOME_DIR" "$STUB_HOME" "$BOOT_HOME" "$REUSE_HOME" "$IDENT_HOME" "$LOCK_HOME" "$STALE_HOME" "$BEAT_HOME"; do
     record="$home/state/.fleet-publish-daemon"
@@ -404,15 +405,16 @@ pass "a daemon lock held by an unrelated live process does not suppress start's 
 # suspending mid-sleep, a slow snapshot read - is still the legitimate lock
 # holder. Stealing its lock would start a second daemon publishing
 # concurrently, defeating the very mutual exclusion the lock exists to
-# provide. A tick window above GRACE (but under cmd_stop's 10s signal-wait, so
-# a SIGTERM sent while the daemon is parked in that tick's sleep still lands
-# well inside the timeout) leaves the beacon genuinely stale for a few seconds
-# between beats while the daemon stays fully live and responsive - the real
-# "running-not-beating" state, not a frozen stand-in for it - so a second
-# start neither steals its lock nor spawns a competing daemon.
+# provide. Staleness here is made DETERMINISTIC rather than timing-derived: the
+# tick stays at its production default (so cmd_stop's fixed 10s SIGTERM wait is
+# never in question) and the state directory is made unwritable so beat()
+# itself fails and the beacon simply stops advancing, while the daemon stays a
+# real, live, identity-provable process. That holds indefinitely, so status,
+# start and stop can each be asserted without racing a beat that would
+# otherwise refresh the beacon back to fresh.
 seed_home "$STALE_HOME"
 printf '30\n' > "$STALE_HOME/config/fleet-snapshot-cadence"
-STALE_ENV=(FM_FLEET_PUBLISH_GRACE=2 FM_FLEET_PUBLISH_TICK_SECS=8 "${FM_TEST_START_ENV[@]}")
+STALE_ENV=(FM_FLEET_PUBLISH_GRACE=2 "${FM_TEST_START_ENV[@]}")
 
 env "${STALE_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" start >/dev/null 2>&1 \
   || fail "the publisher did not start on the stale-beacon home"
@@ -421,10 +423,11 @@ stale_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
 [ -n "$stale_pid" ] || fail "the stale-beacon publisher recorded no pid"
 DAEMON_PIDS+=("$stale_pid")
 
-# Past GRACE=2s with a 5s margin before the next beat at the 8s tick mark, so
-# status and start (each shelling out to ps more than once via daemon_identity)
-# cannot lose a race against the beacon refreshing back to fresh.
-sleep 3
+# Lock the state directory so beat() cannot write a fresh beacon: the daemon
+# stays alive and identity-provable, but the beacon can never refresh again, so
+# waiting past GRACE is not a race against the next tick.
+chmod 555 "$STALE_HOME/state"
+sleep 4
 
 out=$(env FM_FLEET_PUBLISH_GRACE=2 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" status)
 case "$out" in
@@ -456,6 +459,11 @@ after_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
   || fail "a stale beacon must not cause the daemon lock to be stolen and a second publisher started"
 kill -0 "$stale_pid" 2>/dev/null \
   || fail "the original publisher must still be alive after a second start attempt against its stale beacon"
+
+# Restore write access before stopping: cmd_stop's own signal delivery does not
+# need it, but the daemon's EXIT trap does, to remove its record and release
+# its lock like any other stop.
+chmod 755 "$STALE_HOME/state"
 
 out=$(env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" stop 2>&1)
 stop_rc=$?
