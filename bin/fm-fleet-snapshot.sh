@@ -794,7 +794,18 @@ task_json_lines_parallel() {
   # bounds a caller, per that library's own header) cannot reach these workers
   # at all. Only this script's own freeze-then-signal path may ever touch them.
   # Scoped tightly to the spawn-and-wait loop below; restored right after.
+  #
+  # Monitor mode makes bash report a job's death straight to this shell's own
+  # stderr - e.g. "Terminated: 15" - the instant it happens, independent of any
+  # later `wait`. Verified on stock macOS Bash 3.2.57, which is what a caller
+  # actually gets on any PATH without Homebrew bash ahead of /bin. Nothing in
+  # this window has a legitimate stderr of its own to lose: every worker
+  # already sends its own stderr to /dev/null below, and fm_cancel_trees
+  # already silences every kill it issues. So fd 2 is redirected for exactly
+  # the window monitor mode is on, and restored right after it is turned back
+  # off.
   case $- in *m*) monitor_was_on=1 ;; esac
+  exec 9>&2 2>/dev/null
   set -m
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -828,6 +839,7 @@ task_json_lines_parallel() {
     SNAPSHOT_CHILD_PIDS=()
   fi
   [ "$monitor_was_on" -eq 1 ] || set +m
+  exec 2>&9 9>&-
 
   if [ "$launched" -eq 0 ]; then
     printf '[]\n'

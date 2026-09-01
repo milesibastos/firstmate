@@ -977,6 +977,71 @@ test_cancelled_snapshot_group_signal_stops_the_work_it_started() {
   pass "cancelling a snapshot by process group stops the per-task reads it started"
 }
 
+# The two cancellation tests above send the snapshot's own stdout AND stderr to
+# /dev/null, which hides a real defect: putting each worker into its own
+# process group (above) means the fan-out loop runs under `set -m`, and stock
+# macOS Bash 3.2.57 - what a caller actually gets on any PATH without Homebrew
+# bash ahead of /bin - reports a job's death straight to the shell's own
+# stderr under monitor mode, independent of any later `wait`. A real caller
+# (bin/fm-home-summary-refresh.sh) captures this command's stderr and reports
+# its last line as the producer error, so that noise would surface as a bogus
+# error on an otherwise successful read. These two tests capture stderr
+# instead of discarding it and run the real binary under /bin/bash explicitly,
+# because a dev machine with Homebrew bash ahead of /bin on PATH would resolve
+# the `#!/usr/bin/env bash` shebang to a bash version that does not reproduce
+# this at all and would make the test pass vacuously.
+test_snapshot_stderr_stays_clean_on_a_normal_multi_task_run() {
+  local home markers fakebin out err
+  [ -x /bin/bash ] || { pass "stderr-cleanliness check skipped without /bin/bash"; return; }
+  home=$(make_home stderr-clean-normal)
+  markers="$home/markers"
+  mkdir -p "$markers"
+  for i in 1 2 3 4; do write_slow_task "$home" "task$i"; done
+  fakebin=$(make_slow_fakebin "$home" "$markers" 1)
+  err="$home/stderr.log"
+
+  # A concurrency cap smaller than the task count forces multiple spawn/wait
+  # batches inside the monitor-mode window, not just one.
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_TASK_CONCURRENCY=2 \
+    /bin/bash "$SNAPSHOT" --json 2>"$err") \
+    || fail "a normal multi-task run under /bin/bash failed: $(cat "$err")"
+  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.tasks | length) == 4' >/dev/null \
+    || fail "a normal multi-task run under /bin/bash lost rows: $out"
+  [ "$(count_markers "$markers" completed)" -gt 0 ] \
+    || fail "fixture never completed a read; the test would be vacuous"
+  [ -s "$err" ] && fail "a successful run left job-control noise on stderr: $(cat "$err")"
+  pass "a normal multi-task run leaves no job-control noise on stderr under stock Bash"
+}
+
+test_snapshot_stderr_stays_clean_on_an_aborted_run() {
+  local home markers fakebin pid i started err
+  [ -x /bin/bash ] || { pass "stderr-cleanliness check skipped without /bin/bash"; return; }
+  home=$(make_home stderr-clean-aborted)
+  markers="$home/markers"
+  mkdir -p "$markers"
+  for i in 1 2 3 4; do write_slow_task "$home" "task$i"; done
+  fakebin=$(make_slow_fakebin "$home" "$markers" 2)
+  err="$home/stderr.log"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_CANCEL_GRACE=2 \
+    /bin/bash "$SNAPSHOT" --json >/dev/null 2>"$err" &
+  pid=$!
+
+  for i in $(seq 60); do
+    [ "$(count_markers "$markers" started)" -gt 0 ] && break
+    sleep 0.1
+  done
+  started=$(count_markers "$markers" started)
+  [ "$started" -gt 0 ] || fail "fixture never started a per-task read; the test would be vacuous"
+
+  # What a consumer's timeout does: signal the pid it holds.
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the snapshot"
+  wait "$pid" 2>/dev/null
+
+  [ -s "$err" ] && fail "an aborted run left job-control noise on stderr: $(cat "$err")"
+  pass "an aborted run leaves no job-control noise on stderr under stock Bash"
+}
+
 # Scratch space is optional. The snapshot needed none before the fan-out existed
 # and still runs where there is none, which is not hypothetical: the perl-timeout
 # fixture in tests/fm-bearings-snapshot.test.sh runs it on a PATH built from an
@@ -1078,6 +1143,8 @@ test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
 test_cancelled_snapshot_stops_the_work_it_started
 test_cancelled_snapshot_group_signal_stops_the_work_it_started
+test_snapshot_stderr_stays_clean_on_a_normal_multi_task_run
+test_snapshot_stderr_stays_clean_on_an_aborted_run
 test_uncancelled_snapshot_completes_its_reads
 test_cancel_library_refuses_a_root_it_does_not_own
 test_cancel_library_clears_a_tree_it_owns
