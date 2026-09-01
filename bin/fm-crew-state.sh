@@ -566,9 +566,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         HAVE_RUN=1
       fi
     elif [ "$RUN_OWNERSHIP" = foreign ]; then
-      # Re-ask for the run that actually owns the branch. Attribute it only
-      # when it confirms both this branch and its own ownership, so a stale or
-      # unreadable answer reports unresolved rather than guessing again.
+      # Re-ask for the run that actually owns the branch. An owner that
+      # confirms both this branch and its own ownership is subject to the
+      # same active-or-head-matching rule as the owned branch above: a proven
+      # terminal mismatch is a KNOWN state and falls through silently, same as
+      # there. A stale or unreadable answer, or one that never confirms
+      # attribution, reports unresolved instead of guessing again.
       owner_id=$(fm_nm_branch_sync_pipeline_run "$RUN_OUT")
       owner_out=$(nm_run axi status --run "$owner_id")
       if [ -n "$owner_out" ] \

@@ -1921,6 +1921,35 @@ outcome: failed"
   pass "a terminal owner reached via the foreign re-query still obeys the head rule"
 }
 
+# Same scenario with an idle pane, so the silent fall-through is directly
+# observable instead of being masked by the busy-pane short circuit above:
+# it must reach the status log, and must NOT be reported as unresolved.
+test_foreign_owner_terminal_head_mismatch_falls_through_to_status_log() {
+  reset_fakes
+  local d run_short
+  d=$(new_case k1-foreign-owner-terminal-idle)
+  make_repo_on_branch "$d/wt" fm/feat-k1h
+  run_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  # The crew has already committed a fix past the owner-of-record's head.
+  git -C "$d/wt" commit -q --allow-empty -m fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1h.meta" "window=fm:fm-feat-k1h" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-k1h.status"
+  FM_FAKE_AXI_STATUS="$(run_owned fm/feat-k1h 01OLD f0f0f0f0 01NEW)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_owned fm/feat-k1h 01NEW "$run_short" 01NEW)
+outcome: failed"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-k1h
+  local out; out=$(run_crew_state "$d" feat-k1h)
+  assert_not_contains "$out" "state: failed" "a crew working past the foreign-resolved terminal owner is not failed"
+  assert_not_contains "$out" "state: unknown" "the proven head mismatch is a known state, not an unresolved one"
+  assert_not_contains "$out" "run attribution unresolved" "silent fall-through must not be dressed up as unresolved"
+  assert_contains "$out" "source: status-log" "falls through to the status log, as the owned path does for the same shape"
+  assert_contains "$out" "state: working" "the status log's working verb is read"
+  pass "a terminal owner reached via the foreign re-query falls through to the status log, not unresolved"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -2008,6 +2037,7 @@ test_unresolvable_owner_reports_unknown_not_the_status_log
 test_busy_pane_still_wins_over_unresolved_attribution
 test_terminal_run_of_record_still_obeys_the_head_rule
 test_foreign_owner_terminal_head_mismatch_falls_through
+test_foreign_owner_terminal_head_mismatch_falls_through_to_status_log
 test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"
