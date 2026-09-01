@@ -1890,6 +1890,37 @@ outcome: failed"
   pass "a terminal run of record still obeys the head rule"
 }
 
+# Same rule, reached via the foreign re-query instead of the direct owned
+# path: the named branch holder confirms both branch and self-ownership, but
+# is TERMINAL and its head is a strict ancestor of the worktree HEAD (the crew
+# already committed a fix past it). That is a KNOWN state, not an unresolved
+# one, so it must fall through to the pane exactly as the owned path does -
+# never report `failed`, and never dress it up as unresolved either.
+test_foreign_owner_terminal_head_mismatch_falls_through() {
+  reset_fakes
+  local d run_short
+  d=$(new_case k1-foreign-owner-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-k1g
+  run_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  # The crew has already committed a fix past the owner-of-record's head.
+  git -C "$d/wt" commit -q --allow-empty -m fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1g.meta" "window=fm:fm-feat-k1g" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_owned fm/feat-k1g 01OLD f0f0f0f0 01NEW)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_owned fm/feat-k1g 01NEW "$run_short" 01NEW)
+outcome: failed"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-k1g)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-k1g busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-k1g)
+  assert_not_contains "$out" "state: failed" "a crew working past the foreign-resolved terminal owner is not failed"
+  assert_contains "$out" "state: working" "the busy crew reads working"
+  assert_contains "$out" "source: pane" "falls through to the pane, as the owned path does for the same shape"
+  pass "a terminal owner reached via the foreign re-query still obeys the head rule"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1976,6 +2007,7 @@ test_foreign_status_run_defers_to_named_owner
 test_unresolvable_owner_reports_unknown_not_the_status_log
 test_busy_pane_still_wins_over_unresolved_attribution
 test_terminal_run_of_record_still_obeys_the_head_rule
+test_foreign_owner_terminal_head_mismatch_falls_through
 test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"

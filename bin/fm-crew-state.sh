@@ -575,7 +575,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         && [ "$(strip_quotes "$(fm_nm_field "$owner_out" branch)")" = "$CREW_BRANCH" ] \
         && [ "$(fm_nm_run_branch_ownership "$owner_out")" = owned ]; then
         RUN_OUT="$owner_out"
-        HAVE_RUN=1
+        if fm_nm_run_is_active "$owner_out" || nm_run_head_matches_worktree; then
+          HAVE_RUN=1
+        fi
       else
         ATTRIB_UNRESOLVED="branch held by run $owner_id, which did not confirm attribution"
       fi
