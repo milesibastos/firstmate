@@ -15,16 +15,19 @@
 #   fm-procevent-answer-spool.sh poll <spool-dir>
 #
 # arm        Register the spool directory as a source, creating it at mode 0700
-#            when absent. BIND BEFORE YOU ARM. `arm` deliberately does not bind
-#            the keyed-answer intake, because binding is the caller decision and
-#            the ORDER carries the safety: bind first and a captured answer can
-#            never exist with nowhere to go, arm first and an answer dropped in
-#            the gap is captured against an unbound source and feeds nothing.
+#            when absent, and REFUSING an existing directory that is group- or
+#            world-accessible rather than silently arming a spool other local
+#            users can read. BIND BEFORE YOU ARM. `arm` deliberately does not
+#            bind the keyed-answer intake, because binding is the caller
+#            decision and the ORDER carries the safety: bind first and a
+#            captured answer can never exist with nowhere to go, arm first and
+#            an answer dropped in the gap is captured against an unbound
+#            source and feeds nothing.
 #            The supported sequence starts one line earlier still, by making
-#            sure the directory exists: source identity is the resolved path,
-#            so naming one before anything has created it would be an
-#            identity for a source that does not exist.
-#              mkdir -p <spool-dir>
+#            sure the directory exists at a restrictive mode: source identity
+#            is the resolved path, so naming one before anything has created
+#            it would be an identity for a source that does not exist.
+#              (umask 077; mkdir -p <spool-dir>)
 #              id=$(bin/fm-procevent-answer-spool.sh source-id <spool-dir>)
 #              bin/fm-captain-hold.sh bind "$id"
 #              bin/fm-procevent-answer-spool.sh arm <spool-dir>
@@ -221,7 +224,7 @@ scan_interval() {
 }
 
 cmd_arm() {
-  local dir=${1-} id real binding
+  local dir=${1-} id real binding mode
   [ -n "$dir" ] || usage
   [ "$#" -eq 1 ] || usage
   case "$dir" in *$'\n'*) die "spool paths cannot contain newlines" ;; esac
@@ -237,6 +240,13 @@ cmd_arm() {
   fi
   real=$(resolve_spool "$dir") || exit 1
   [ ! -L "$real" ] && [ -d "$real" ] || die "spool path is not a directory: $dir"
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$real" 2>/dev/null) || die "cannot read the spool directory mode: $real"
+  else
+    mode=$(stat -c %a "$real" 2>/dev/null) || die "cannot read the spool directory mode: $real"
+  fi
+  [ "$(( 8#$mode & 8#77 ))" -eq 0 ] \
+    || die "spool directory is group- or world-accessible: $real (mode $mode) - fix with: chmod go-rwx $real"
   id=$(cmd_source_id "$real") || exit 1
   "$SCRIPT_DIR/fm-procevent.sh" register answer-spool "$id" \
     -- "$SCRIPT_DIR/fm-procevent-answer-spool.sh" poll "$real" || exit 1

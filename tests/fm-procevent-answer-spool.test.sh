@@ -53,10 +53,18 @@ wait_for() {  # <file> [tries]
   return 1
 }
 
-new_spool() {  # <name>: print a fresh empty spool directory
+new_spool() {  # <name>: print a fresh empty spool directory, at a private mode
   local dir="$TMP_ROOT/$1"
-  mkdir -p "$dir"
+  (umask 077; mkdir -p "$dir")
   printf '%s\n' "$dir"
+}
+
+dir_mode() {  # <path>: print its octal permission bits, BSD or GNU stat
+  if [ "$(uname)" = Darwin ]; then
+    stat -f %Lp "$1"
+  else
+    stat -c %a "$1"
+  fi
 }
 
 # Run one blocking poll with a watchdog, so a poll that never returns fails the
@@ -281,6 +289,37 @@ FM_HOME="$ARM_HOME" "$ADAPTER" retire "$SPOOL" >/dev/null \
   || fail "retiring an armed spool failed"
 assert_absent "$ARM_HOME/state/procevent/$ARM_ID.source" "retire dropped the registration"
 pass "arm registers without binding, warns about it, and one spool is one identity"
+
+# --- arm creates a fresh spool directory at a restrictive mode ---------------
+# The header promises mode 0700 when absent, not "whatever the caller's umask
+# allows", so this must hold even under a permissive ambient umask.
+UMASK_HOME="$TMP_ROOT/umask-home"
+mkdir -p "$UMASK_HOME/state"
+FRESH_SPOOL="$TMP_ROOT/fresh-private-spool"
+FRESH_ARM_OUT=$(umask 022; FM_HOME="$UMASK_HOME" "$ADAPTER" arm "$FRESH_SPOOL") \
+  || fail "arming a brand-new spool under a permissive umask failed: $FRESH_ARM_OUT"
+FRESH_ID=$("$ADAPTER" source-id "$FRESH_SPOOL")
+PE_TRACKED+=("$UMASK_HOME|$FRESH_ID")
+FRESH_MODE=$(dir_mode "$FRESH_SPOOL")
+[ "$(( 8#$FRESH_MODE & 8#77 ))" -eq 0 ] \
+  || fail "arm created a spool directory readable by group or other under a permissive umask: mode $FRESH_MODE"
+pass "the documented sequence yields a private directory under a permissive umask"
+
+# --- arm refuses a pre-existing group- or world-accessible spool -------------
+# Silently arming it would watch a directory other local users can read;
+# silently chmod-ing it would surprise whoever set that mode on purpose.
+WORLD_HOME="$TMP_ROOT/world-home"
+mkdir -p "$WORLD_HOME/state"
+WORLD_SPOOL=$(new_spool world-readable)
+chmod 755 "$WORLD_SPOOL"
+WORLD_ID=$("$ADAPTER" source-id "$WORLD_SPOOL")
+WORLD_ERR=$(FM_HOME="$WORLD_HOME" "$ADAPTER" arm "$WORLD_SPOOL" 2>&1) \
+  && fail "arm accepted a group/world-accessible spool directory"
+assert_contains "$WORLD_ERR" "$WORLD_SPOOL" "the refusal names the offending directory"
+assert_contains "$WORLD_ERR" '755' "the refusal names the mode found"
+assert_contains "$WORLD_ERR" 'chmod go-rwx' "the refusal names the exact fix command"
+assert_absent "$WORLD_HOME/state/procevent/$WORLD_ID.source" "arm registered a source it should have refused"
+pass "arm refuses a pre-existing world-readable spool instead of arming it"
 
 # --- end to end: a dropped record closes a real captain-held task -------------
 # The point of the whole adapter. Nothing below asserts the outcome from the
