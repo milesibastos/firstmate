@@ -16,11 +16,12 @@ STUB_HOME="$TMP_ROOT/stub-home"
 BOOT_HOME="$TMP_ROOT/boot-home"
 REUSE_HOME="$TMP_ROOT/reuse-home"
 IDENT_HOME="$TMP_ROOT/identity-home"
+LOCK_HOME="$TMP_ROOT/lock-home"
 DAEMON_PIDS=()
 
 cleanup() {
   local record pid home
-  for home in "$HOME_DIR" "$STUB_HOME" "$BOOT_HOME" "$REUSE_HOME" "$IDENT_HOME"; do
+  for home in "$HOME_DIR" "$STUB_HOME" "$BOOT_HOME" "$REUSE_HOME" "$IDENT_HOME" "$LOCK_HOME"; do
     record="$home/state/.fleet-publish-daemon"
     [ -f "$record" ] || continue
     pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$record" 2>/dev/null | head -1)
@@ -319,7 +320,7 @@ seed_home "$REUSE_HOME"
 printf '30\n' > "$REUSE_HOME/config/fleet-snapshot-cadence"
 # The dead publisher's own record and a beacon it wrote moments before dying.
 printf 'pid=%s\nproc_start=%s\ntoken=%s\nstarted=seeded\ncadence=30\n' \
-  "$DECOY_PID" "$(ps -p "$DECOY_PID" -o lstart= | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')" \
+  "$DECOY_PID" "$(LC_ALL=C ps -p "$DECOY_PID" -o lstart= | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')" \
   dead-instance-token > "$REUSE_HOME/state/.fleet-publish-daemon"
 printf 'dead-instance-token\n' > "$REUSE_HOME/state/.fleet-publish-beat"
 
@@ -352,6 +353,49 @@ wait "$DECOY_PID" >/dev/null 2>&1 || true
 DECOY_PID=
 pass "a recycled pid with a fresh beacon is not mistaken for the publisher"
 
+# The record+beacon liveness check above binds identity, but a recycled pid can
+# also be met on a sibling path: as the recorded holder of the daemon's own
+# singleton lock. fm_lock_try_acquire (bin/fm-wake-lib.sh) is the shared
+# primitive that guards that lock, and it treats the lock as legitimately held
+# whenever its recorded pid is merely alive - it has no start-time or cmdline
+# binding. Fabricate exactly that: a lock recorded against a live process that
+# is not a publisher, backdated well past the lock's own mid-acquire freshness
+# window so it reads as a lock a dead daemon left behind, with no daemon record
+# at all. Recovery through `start` must not be suppressed by this path any more
+# than by the record+beacon path above, and the unrelated process must never be
+# touched.
+seed_home "$LOCK_HOME"
+printf '30\n' > "$LOCK_HOME/config/fleet-snapshot-cadence"
+
+DECOY_PID=
+( exec -a fm-fleet-publish-lock-decoy sleep 120 ) >/dev/null 2>&1 &
+DECOY_PID=$!
+DAEMON_PIDS+=("$DECOY_PID")
+
+LOCKDIR="$LOCK_HOME/state/.fleet-publish-daemon.lock"
+OWNERDIR="$LOCKDIR.owner.faketest"
+mkdir -p "$OWNERDIR"
+printf '%s\n' "$DECOY_PID" > "$OWNERDIR/pid"
+ln -s "$OWNERDIR" "$LOCKDIR"
+touch -h -t 202001010000 "$LOCKDIR"
+
+env "${FM_TEST_START_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LOCK_HOME" "$PUBLISH" start >/dev/null 2>&1 \
+  || fail "start must recover a publisher even when the daemon lock is held by an unrelated live process"
+lock_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
+  "$LOCK_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
+[ -n "$lock_pid" ] || fail "recovery through the daemon lock recorded no publisher pid"
+DAEMON_PIDS+=("$lock_pid")
+[ "$lock_pid" != "$DECOY_PID" ] \
+  || fail "start adopted the unrelated process holding the daemon lock instead of starting a publisher"
+kill -0 "$lock_pid" 2>/dev/null || fail "the recovered publisher is not running"
+kill -0 "$DECOY_PID" 2>/dev/null \
+  || fail "an unrelated process holding the daemon lock was signalled"
+env "${FM_TEST_START_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LOCK_HOME" "$PUBLISH" stop >/dev/null 2>&1 || true
+kill -KILL "$DECOY_PID" >/dev/null 2>&1 || true
+wait "$DECOY_PID" >/dev/null 2>&1 || true
+DECOY_PID=
+pass "a daemon lock held by an unrelated live process does not suppress start's recovery"
+
 # The identity a publisher records must describe the publisher, and this checks
 # that against the kernel rather than against itself. state/<home>/.fleet-publish-daemon
 # is this script's own published state record (AGENTS.md section 2 lists it), so
@@ -379,7 +423,7 @@ while [ "$ident_round" -lt 3 ]; do
   DAEMON_PIDS+=("$ident_pid")
   ident_recorded=$(sed -n 's/^proc_start=//p' \
     "$IDENT_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
-  ident_live=$(ps -p "$ident_pid" -o lstart= 2>/dev/null \
+  ident_live=$(LC_ALL=C ps -p "$ident_pid" -o lstart= 2>/dev/null \
     | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
   [ -n "$ident_recorded" ] \
     || fail "the publisher published no process start time on round $ident_round"

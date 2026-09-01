@@ -94,10 +94,12 @@
 #          detaches; run it directly to watch the loop or to host it under a
 #          supervisor of your own.
 #
-# The loop re-reads the configuration on every tick, so removing the file stops
-# the daemon within one tick and a changed cadence takes effect without a
-# restart. That is what makes "absent configuration means absent behaviour" true
-# continuously rather than only at start time.
+# The loop re-reads the configuration on every tick. A changed cadence takes
+# effect without a restart, and removing or breaking the file stops the daemon
+# once it still reads that way on a second consecutive look - within about two
+# ticks, not one, because a single unreadable moment must not retire a
+# publisher the home still wants. That is what makes "absent configuration
+# means absent behaviour" true continuously rather than only at start time.
 #
 # Environment:
 #   FM_FLEET_PUBLISH_TIMEOUT       seconds bounding one snapshot read (default 120)
@@ -184,9 +186,13 @@ path_mtime() {
 
 # proc_start_of <pid>: the kernel's start time for that pid, normalized.
 # A recycled pid gets a new start time, so this is what separates "the process
-# we recorded" from "whatever now holds that number".
+# we recorded" from "whatever now holds that number". LC_ALL=C pins lstart's
+# date format to be locale-invariant, matching fm-wake-lib.sh's fm_pid_identity:
+# the identity is written under one locale and re-read under the machine's
+# ambient locale, which would otherwise mismatch on a non-C locale and reject a
+# live publisher.
 proc_start_of() {
-  ps -p "$1" -o lstart= 2>/dev/null | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'
+  LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'
 }
 
 # proc_is_publisher <pid>: the live process is running this script.
@@ -527,6 +533,7 @@ beat() {
 
 cmd_run() {
   local cadence rc slept slice record_tmp config_failures=0 daemon_pid daemon_proc_start
+  local alive holder_proven
   if ! mkdir -p "$STATE" 2>/dev/null; then
     printf 'fm-fleet-publish: state directory is unavailable: %s\n' "$STATE" >&2
     return 1
@@ -542,8 +549,34 @@ cmd_run() {
     return 1
   fi
   if ! fm_lock_try_acquire "$DAEMON_LOCK"; then
-    printf 'fm-fleet-publish: this home already has a publisher running\n' >&2
-    return 3
+    # PUBLISHER-LOCAL IDENTITY GUARD. fm_lock_try_acquire (bin/fm-wake-lib.sh) is
+    # the shared singleton-lock primitive roughly twenty scripts rely on, and it
+    # treats a lock as legitimately held whenever the recorded pid is merely
+    # alive (fm_pid_alive) - it has no start-time or cmdline binding. A daemon
+    # killed right after the kernel recycles its pid to an unrelated live
+    # process therefore still blocks recovery here even though daemon_alive
+    # (which DOES bind identity) correctly reports no publisher running. This
+    # guard closes that gap for THIS home's daemon lock only, by re-proving the
+    # lock's recorded holder with the same four-fact identity test daemon_alive
+    # uses before treating a failed acquire as proof a real publisher is up.
+    # Fixing fm_pid_alive/fm_lock_try_acquire itself is a separate task with a
+    # different blast radius (it also gates the watcher and every other home in
+    # the fleet) and is filed on its own; do not delete this guard as redundant
+    # when that lands, and do not assume it protects more than this one lock.
+    # A lock younger than FM_LOCK_STALE_AFTER is never condemned here, even when
+    # identity is unprovable: a publisher that just won the race has not yet had
+    # time to write its own record, and stealing that lock mid-startup would
+    # break the very mutual exclusion this lock exists to provide.
+    holder_proven=0
+    if alive=$(daemon_alive) && [ "${alive%%$'\t'*}" = "$FM_LOCK_HELD_PID" ]; then
+      holder_proven=1
+    fi
+    if [ "$holder_proven" -eq 1 ] \
+      || [ "$(fm_path_age "$DAEMON_LOCK")" -lt "$FM_LOCK_STALE_AFTER" ] \
+      || { fm_lock_remove_path "$DAEMON_LOCK" 2>/dev/null; ! fm_lock_try_acquire "$DAEMON_LOCK"; }; then
+      printf 'fm-fleet-publish: this home already has a publisher running\n' >&2
+      return 3
+    fi
   fi
   FLEET_PUBLISH_DAEMON_LOCK_HELD=1
   trap daemon_cleanup EXIT
@@ -584,10 +617,12 @@ cmd_run() {
       log_failure "$FLEET_PUBLISH_ERROR"
     fi
     beat
-    # Sleep the cadence in slices so a removed or edited configuration is
-    # honoured within one tick instead of one cadence. Re-reading here, not only
-    # at startup, is what keeps "absent configuration means absent behaviour"
-    # true for a daemon that is already running.
+    # Sleep the cadence in slices so the configuration is re-read every tick
+    # instead of once per cadence: a changed cadence takes effect within one
+    # tick, and a removed or unusable one stops the daemon within about two
+    # ticks (see below). Re-reading here, not only at startup, is what keeps
+    # "absent configuration means absent behaviour" true for a daemon that is
+    # already running.
     slept=0
     while [ "$slept" -lt "$cadence" ]; do
       slice=$TICK_SECS
@@ -604,7 +639,8 @@ cmd_run() {
         # unavailable filesystem must not be able to retire a publisher that the
         # home still wants, so stopping requires the configuration to still be
         # gone or unusable on a second consecutive look. A genuinely removed
-        # file reads the same way twice and still stops within a tick.
+        # file reads the same way twice and stops the daemon within about two
+        # ticks.
         config_failures=$(( config_failures + 1 ))
         if [ "$config_failures" -ge 2 ]; then
           if [ "$rc" -eq 1 ]; then

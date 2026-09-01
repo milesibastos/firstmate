@@ -222,7 +222,7 @@ Degrading to stale is correct because the consumer can still say how old the pic
 
 The publisher runs detached, in its own process group, and outlives the session that armed it, so the artifact keeps advancing with no agent alive.
 A locked session start arms it when this file is present, and `bin/fm-fleet-publish.sh start` arms it by hand; both are idempotent and leave an already-running publisher alone.
-It re-reads this file on every tick, so a changed cadence takes effect without a restart and removing the file stops the publisher within one tick while leaving the last published snapshot in place.
+It re-reads this file on every tick, so a changed cadence takes effect without a restart; removing or breaking the file stops the publisher once it still reads that way on a second consecutive look, within about two ticks, while leaving the last published snapshot in place. A single unreadable moment must not retire a publisher the home still wants.
 This file is not inherited by secondmate homes, because a home opts in for the surface it actually hosts.
 `bin/fm-fleet-publish.sh`'s header owns the publication mechanics, the detachment contract, and why no watcher-armed or away-mode mechanism can carry this work.
 
