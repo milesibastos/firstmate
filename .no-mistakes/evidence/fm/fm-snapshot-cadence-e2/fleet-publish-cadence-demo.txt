@@ -1,0 +1,73 @@
+fm-fleet-publish.sh manual verification transcript (branch fm/fm-snapshot-cadence-e2, target 283dce5)
+
+CAVEAT: this test-phase agent's shell has no controlling terminal anywhere in its
+process ancestry (launchd -> no-mistakes -> claude -> zsh -> bash all show TTY=??).
+macOS's /usr/bin/nohup calls __vprocmgr_detach_from_console before exec (confirmed
+via `nm -u /usr/bin/nohup`), which fails with "can't detach from console:
+Inappropriate ioctl for device" and exit 127 when no console session exists -
+reproduced with a neutral command, `nohup /bin/sleep 5`, no project code involved.
+bin/fm-fleet-publish.sh's launch_publisher() shells out to nohup unconditionally
+(bin/fm-fleet-publish.sh:803), so `start` cannot spawn a daemon AT ALL in this
+exact process context - this is a real, deterministic failure of the shipped
+`start` command in this environment, reported separately as a finding.
+
+To still observe the cadence loop's actual behavior end-to-end, the transcript
+below was captured with nohup replaced on PATH by a shim that ignores SIGHUP and
+execs directly (`trap "" HUP; exec "$@"`), i.e. the same detach contract nohup
+promises, minus the one macOS call that needs a console session. This is NOT how
+the shipped script runs unmodified in this environment; it isolates whether the
+rest of the mechanism (cadence loop, atomic publish, beacon, identity, stop) is
+correct once launch succeeds. Real producer (bin/fm-fleet-snapshot.sh) was used,
+cadence=5s, FM_FLEET_PUBLISH_MIN_CADENCE=1 (the documented test seam).
+
+----------------------------------------------------------------------
+$ fm-fleet-publish.sh status  (before start)
+publisher: enabled cadence=5s daemon=stopped (run: bin/fm-fleet-publish.sh start)
+snapshot: /tmp/fmdebug/demo-home/state/fleet-snapshot.json has not been published
+
+$ fm-fleet-publish.sh start
+publisher: started pid=89785 cadence=5s
+
+$ fm-fleet-publish.sh status  (poll 1, +6s)
+publisher: enabled cadence=5s daemon=running pid=89785 beacon=2s
+snapshot: /tmp/fmdebug/demo-home/state/fleet-snapshot.json generated=2026-09-01T22:23:43Z published=2s ago
+  generated field: 2026-09-01T22:23:43Z
+
+$ fm-fleet-publish.sh status  (poll 2, +12s)
+publisher: enabled cadence=5s daemon=running pid=89785 beacon=2s
+snapshot: /tmp/fmdebug/demo-home/state/fleet-snapshot.json generated=2026-09-01T22:23:49Z published=2s ago
+  generated field: 2026-09-01T22:23:49Z
+
+$ fm-fleet-publish.sh status  (poll 3, +18s)
+publisher: enabled cadence=5s daemon=running pid=89785 beacon=3s
+snapshot: /tmp/fmdebug/demo-home/state/fleet-snapshot.json generated=2026-09-01T22:23:54Z published=4s ago
+  generated field: 2026-09-01T22:23:54Z
+
+$ fm-fleet-publish.sh status  (poll 4, +24s)
+publisher: enabled cadence=5s daemon=running pid=89785 beacon=4s
+snapshot: /tmp/fmdebug/demo-home/state/fleet-snapshot.json generated=2026-09-01T22:24:00Z published=4s ago
+  generated field: 2026-09-01T22:24:00Z
+
+$ fm-fleet-publish.sh status  (poll 5, +30s)
+publisher: enabled cadence=5s daemon=running pid=89785 beacon=4s
+snapshot: /tmp/fmdebug/demo-home/state/fleet-snapshot.json generated=2026-09-01T22:24:06Z published=4s ago
+  generated field: 2026-09-01T22:24:06Z
+
+$ ps -o pid,ppid,pgid,command -p 89785  (confirm detachment)
+  PID  PPID  PGID COMMAND
+89785     1 89785 bash .../bin/fm-fleet-publish.sh run
+
+$ fm-fleet-publish.sh stop
+publisher: stopped pid=89785
+
+$ fm-fleet-publish.sh status  (after stop)
+publisher: enabled cadence=5s daemon=stopped (run: bin/fm-fleet-publish.sh start)
+snapshot: /tmp/fmdebug/demo-home/state/fleet-snapshot.json generated=2026-09-01T22:24:17Z published=6s ago
+----------------------------------------------------------------------
+
+Observed: the artifact's `generated` field advanced on its own (22:23:43 ->
+22:23:49 -> 22:23:54 -> 22:24:00 -> 22:24:06) across five status polls issued
+from a shell that never re-ran a producer or publish command itself, matching
+the DoD's "artifact's age visibly advancing" requirement. The daemon ran
+detached (PPID=1, own process group), and stop cleanly signalled it, leaving
+the last published snapshot in place.

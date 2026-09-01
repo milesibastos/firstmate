@@ -1,0 +1,80 @@
+Manual end-to-end verification of bin/fm-fleet-publish.sh on branch fm/fm-snapshot-cadence-e2
+(target commit 46f5c8dc2b7a9f383201fe3d11bd01cdd84a63ec), run from a fresh interactive
+shell against a seeded scratch home ($DEMO), independent of the automated test suite.
+
+This demonstrates two things the automated suite cannot show as directly:
+1. The nohup dependency this commit removes was a real, live problem in this sandbox
+   (nohup itself is broken here), and the replacement (SIGHUP-ignoring subshell + exec)
+   launches successfully where nohup would not.
+2. The DoD requirement "enabled on a real home and observed to republish on its own,
+   with the artifact's age visibly advancing - proved, not asserted" from a shell that
+   later exits.
+
+--- Step 0: confirm nohup itself is broken in this sandbox (the original bug this
+    commit's launcher change fixes) ---
+
+$ nohup /bin/sleep 0
+nohup: can't detach from console: Inappropriate ioctl for device
+nohup exit=127
+
+--- Step 1: seed a scratch home and enable a 1s cadence, then start the publisher
+    through the REAL (unshimmed) launch_publisher path ---
+
+$ printf '1\n' > "$DEMO/config/fleet-snapshot-cadence"
+$ env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$DEMO" FM_FLEET_PUBLISH_MIN_CADENCE=1 \
+    FM_FLEET_PUBLISH_START_WAIT=30 FM_FLEET_PUBLISH_START_ATTEMPTS=5 \
+    bash bin/fm-fleet-publish.sh start
+publisher: started pid=16438 cadence=1s
+start_rc=0
+
+--- Step 2: confirm the publisher is fully detached (reparented to init, own
+    process group distinct from the launching shell's) ---
+
+$ ps -o pid,ppid,pgid,stat,command -p 16438
+  PID  PPID  PGID STAT COMMAND
+16438     1 16438 S    bash .../bin/fm-fleet-publish.sh run
+
+$ ps -o pid,pgid -p $$   # the launching shell
+  PID  PGID
+18143 18143
+
+PPID=1 confirms it was reparented to init (fully detached from the launching
+shell), and its process group (16438) differs from the shell's (18143).
+
+--- Step 3: watch the published snapshot's own `generated` timestamp advance on
+    its own, polled from a loop with no fm-fleet-publish invocation in between ---
+
+$ for i in 1 2 3 4 5 6; do
+    ts=$(date -u +%H:%M:%S)
+    gen=$(jq -r '.generated // "MISSING"' "$DEMO/state/fleet-snapshot.json")
+    echo "wallclock=$ts generated=$gen"
+    sleep 2
+  done
+wallclock=22:56:18 generated=2026-09-01T22:56:17Z
+wallclock=22:56:20 generated=2026-09-01T22:56:20Z
+wallclock=22:56:23 generated=2026-09-01T22:56:21Z
+wallclock=22:56:25 generated=2026-09-01T22:56:24Z
+wallclock=22:56:27 generated=2026-09-01T22:56:26Z
+wallclock=22:56:29 generated=2026-09-01T22:56:29Z
+
+The artifact's age visibly advances on its own cadence, produced entirely by the
+detached background publisher (pid 16438) with no command run by the observing
+shell in between polls.
+
+--- Step 4: schema identity is untouched (out of scope per user intent) ---
+
+$ jq -r '.schema' "$DEMO/state/fleet-snapshot.json"
+fm-fleet-snapshot.v1
+
+--- Step 5: stop cleanly, confirm the process is gone ---
+
+$ env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$DEMO" bash bin/fm-fleet-publish.sh stop
+publisher: stopped pid=16438
+stop_rc=0
+
+$ ps -p 16438
+  PID TTY           TIME CMD
+(no matching process)
+
+Scratch home ($DEMO, a /tmp directory outside the worktree) was discarded after
+this run; no repository files were modified by this manual verification.
