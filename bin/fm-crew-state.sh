@@ -283,6 +283,71 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
+# Verdict for the gate's finding actions, read from the authoritative
+# findings[N]{...} TOON table rather than by searching the raw output: the
+# words "ask-user" also appear in a gate's own `note:` line, in `help[N]:`
+# commands, and in any finding description, so a substring search reports an
+# authority decision for a gate whose only finding is auto-fix.
+# no-mistakes states that finding field names and column order vary by step
+# and version, so the header's own field list - never a fixed position - owns
+# the `action` index, and every extracted token is validated against the
+# action enum (no-op|auto-fix|ask-user) so a misaligned split can never pass
+# as "not ask-user".
+# Prints exactly one of:
+#   ask-user  at least one finding asks for firstmate's authority
+#   clear     every finding's action was read and none is ask-user
+#   unknown   the actions could not be read; an ask-user finding is NOT ruled out
+nm_gate_finding_actions_verdict() {
+  local verdict count
+  verdict=$(printf '%s\n' "$RUN_OUT" | awk '
+    function bad() { done = 1; print "unknown"; exit }
+    /^[[:space:]]*findings\[[0-9]+\]\{[^}]*\}:[[:space:]]*$/ {
+      seen = 1
+      n = $0; sub(/^[[:space:]]*findings\[/, "", n); sub(/\].*$/, "", n)
+      f = $0; sub(/^[^{]*\{/, "", f); sub(/\}.*$/, "", f)
+      nf = split(f, cols, ",")
+      idx = 0
+      for (i = 1; i <= nf; i++) {
+        c = cols[i]; gsub(/^[ \t"]+|[ \t"]+$/, "", c)
+        if (c == "action") idx = i
+      }
+      if (idx == 0) bad()
+      for (k = 0; k < n + 0; k++) {
+        if ((getline line) <= 0) bad()
+        m = split(line, parts, ",")
+        if (m < idx) bad()
+        a = parts[idx]; gsub(/^[ \t"]+|[ \t"]+$/, "", a)
+        if (a == "ask-user") { done = 1; print "ask-user"; exit }
+        if (a != "auto-fix" && a != "no-op") bad()
+      }
+      next
+    }
+    END { if (!done) print (seen ? "clear" : "none") }
+  ')
+  if [ "$verdict" != none ]; then
+    printf '%s' "$verdict"
+    return
+  fi
+  # No findings table at all. A READ zero - a gate step row reporting zero
+  # findings, or an explicit scalar `findings: none` - has no finding that
+  # could be an ask-user one. Anything else leaves the actions unknown.
+  # The step row is consulted FIRST: a run-level `findings: none` alongside a
+  # gate step row reporting findings describes a gate whose findings this
+  # output did not carry, and trusting the scalar there would clear exactly
+  # the ask-user finding this function exists to catch.
+  count=$(nm_gate_findings_count)
+  case "$count" in
+    0) printf 'clear'; return ;;
+    '') ;;
+    *) printf 'unknown'; return ;;
+  esac
+  if printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*findings:[[:space:]]*"?none"?[[:space:]]*$'; then
+    printf 'clear'
+    return
+  fi
+  printf 'unknown'
+}
+
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
   case "$(status_line_note "$LOG_LINE")" in
@@ -517,9 +582,12 @@ if [ "$HAVE_RUN" = 1 ]; then
       RUN_DETAIL="parked at $gate"
       fcount=$(nm_gate_findings_count)
       [ -n "$fcount" ] && RUN_DETAIL="$RUN_DETAIL: $fcount finding(s)"
-      if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
-        RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
-      fi
+      case "$(nm_gate_finding_actions_verdict)" in
+        ask-user)
+          RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)" ;;
+        unknown)
+          RUN_DETAIL="$RUN_DETAIL (finding actions unreadable - may include an authority decision)" ;;
+      esac
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;

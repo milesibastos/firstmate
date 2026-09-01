@@ -231,6 +231,87 @@ gate: review
 EOF
 }
 
+# The 2026-09-01 incident shape: the gate's ONLY finding is auto-fix, but the
+# words "ask-user" appear in the gate's own `note:` line (this is the real
+# no-mistakes note, verbatim) and again in a `help[N]:` command. A supervisor
+# that searches the raw output instead of reading the `action` column reports
+# an authority decision the worker correctly did not escalate.
+run_parked_autofix_only_askuser_prose() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+gate: review
+note: Review auto-fix is disabled by default (auto_fix.review: 0), so blocking and ask-user review findings park for your decision rather than being silently self-fixed.
+findings[1]{id,severity,file,line,action,description}:
+  r1,warning,a.go,,auto-fix,Error from os.Remove is ignored
+help[2]:
+  Run \`no-mistakes axi respond --action approve\` to accept this step and continue
+  Run \`no-mistakes axi respond --action fix --findings <ids>\` to fix the selected findings; escalate ask-user findings first
+EOF
+}
+
+# A findings header whose columns do not include `action` at all - the CLI
+# documents that field names and columns vary by step and version. The actions
+# are unreadable, which is NOT the same as "no ask-user finding".
+run_parked_header_without_action() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[1]{id,severity,file,line,description}:
+    r1,error,b.go,,changes product behavior
+gate: review
+EOF
+}
+
+# A findings table truncated below its own declared row count: the header
+# promises two rows and only one arrives, so the second finding's action was
+# never read.
+# A run-level scalar `findings: none` alongside a gate step row that reports a
+# finding: the gate HAS a finding whose action this output did not carry, so
+# the scalar is not a read zero for that finding.
+run_parked_scalar_none_but_step_row_has_finding() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+gate: review
+steps[3]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  review,fix_review,1,0
+  test,pending,0,0
+EOF
+}
+
+run_parked_truncated_findings() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+gate: review
+findings[2]{id,severity,file,line,action,description}:
+  r1,warning,a.go,,auto-fix,Error from os.Remove is ignored
+EOF
+}
+
 run_parked_scalar_gate_running() {  # <branch>
   cat <<EOF
 run:
@@ -402,7 +483,8 @@ test_genuine_parked_not_superseded() {
   assert_contains "$out" "state: parked" "genuine parked run -> parked"
   assert_contains "$out" "source: run-step" "parked -> run-step source"
   assert_contains "$out" "2 finding(s)" "parked includes gate finding count"
-  assert_contains "$out" "ask-user" "parked surfaces ask-user finding"
+  assert_contains "$out" "(ask-user: authority decision)" \
+    "parked surfaces the authority-decision label for a non-first ask-user finding"
   assert_not_contains "$out" "superseded" "agreeing parked+needs-decision not flagged stale"
   pass "genuine parked run is not flagged superseded"
 }
@@ -422,6 +504,74 @@ test_scalar_gate_parked_not_superseded() {
   assert_contains "$out" "1 finding(s)" "scalar gate wait includes finding count"
   assert_not_contains "$out" "superseded" "scalar gate wait not flagged stale"
   pass "scalar gate parked run is not flagged superseded"
+}
+
+# The authority-decision label must come from the finding's own `action`
+# column, never from the words "ask-user" appearing anywhere in the output.
+test_parked_autofix_only_is_not_ask_user() {
+  reset_fakes
+  local d; d=$(new_case parked-autofix-only)
+  make_repo_on_branch "$d/wt" fm/feat-af
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-af.meta" "window=fm:fm-feat-af" "worktree=$d/wt" "kind=ship"
+  printf 'working: at review gate\n' > "$d/state/feat-af.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_autofix_only_askuser_prose fm/feat-af)"
+  local out; out=$(run_crew_state "$d" feat-af)
+  assert_contains "$out" "state: parked" "auto-fix-only gate still parks"
+  assert_contains "$out" "1 finding(s)" "auto-fix-only gate reports its finding count"
+  assert_not_contains "$out" "(ask-user: authority decision)" \
+    "auto-fix-only finding is never labelled an authority decision"
+  assert_not_contains "$out" "unreadable" "a fully read auto-fix action is not unreadable"
+  pass "auto-fix-only gate with ask-user prose is not an authority decision"
+}
+
+# An action that could not be read is unknown - not auto-fix. Labelling it
+# clear would let a worker answer an ask-user finding the supervisor missed.
+test_parked_unreadable_actions_say_so() {
+  reset_fakes
+  local d; d=$(new_case parked-unreadable)
+  make_repo_on_branch "$d/wt" fm/feat-ur
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ur.meta" "window=fm:fm-feat-ur" "worktree=$d/wt" "kind=ship"
+  printf 'working: at review gate\n' > "$d/state/feat-ur.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_header_without_action fm/feat-ur)"
+  local out; out=$(run_crew_state "$d" feat-ur)
+  assert_contains "$out" "state: parked" "header without an action column still parks"
+  assert_contains "$out" "unreadable" "missing action column is reported as unreadable"
+  assert_not_contains "$out" "(ask-user: authority decision)" \
+    "unreadable actions are not asserted to be an authority decision"
+  pass "findings header without an action column reports unreadable actions"
+}
+
+test_parked_truncated_findings_say_unreadable() {
+  reset_fakes
+  local d; d=$(new_case parked-truncated)
+  make_repo_on_branch "$d/wt" fm/feat-tr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-tr.meta" "window=fm:fm-feat-tr" "worktree=$d/wt" "kind=ship"
+  printf 'working: at review gate\n' > "$d/state/feat-tr.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_truncated_findings fm/feat-tr)"
+  local out; out=$(run_crew_state "$d" feat-tr)
+  assert_contains "$out" "state: parked" "truncated findings table still parks"
+  assert_contains "$out" "unreadable" "a row short of the declared count is unreadable"
+  pass "findings table truncated below its declared count reports unreadable"
+}
+
+test_parked_scalar_none_with_step_finding_is_unreadable() {
+  reset_fakes
+  local d; d=$(new_case parked-scalar-none)
+  make_repo_on_branch "$d/wt" fm/feat-sn
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-sn.meta" "window=fm:fm-feat-sn" "worktree=$d/wt" "kind=ship"
+  printf 'working: at review gate\n' > "$d/state/feat-sn.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_scalar_none_but_step_row_has_finding fm/feat-sn)"
+  local out; out=$(run_crew_state "$d" feat-sn)
+  assert_contains "$out" "state: parked" "scalar none with a step-row finding still parks"
+  assert_contains "$out" "unreadable" \
+    "a run-level findings: none never clears a finding the gate step row reports"
+  assert_not_contains "$out" "(ask-user: authority decision)" \
+    "an unread action is not asserted to be an authority decision"
+  pass "run-level findings: none does not clear a gate step row's own finding"
 }
 
 test_gate_block_parked_not_superseded() {
@@ -1554,6 +1704,10 @@ test_stale_blocked_superseded
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
+test_parked_autofix_only_is_not_ask_user
+test_parked_unreadable_actions_say_so
+test_parked_truncated_findings_say_unreadable
+test_parked_scalar_none_with_step_finding_is_unreadable
 test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
