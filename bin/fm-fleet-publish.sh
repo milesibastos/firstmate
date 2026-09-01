@@ -740,7 +740,8 @@ start_refuse_stale() {  # <pid> <age>
 }
 
 cmd_start() {
-  local cadence rc state_out state_rc pid age waited attempt child_pid= launch_err
+  local cadence rc state_out state_rc pid age waited attempt launch_err
+  local child_pid=''
   read_cadence; rc=$?
   cadence=$FLEET_PUBLISH_CADENCE
   if [ "$rc" -ne 0 ]; then
