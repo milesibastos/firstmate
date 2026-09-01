@@ -36,9 +36,12 @@
 #      inferred answers break - recency picks the newest row even when it is a
 #      superseded terminal one (reported as `failed`, a stop-and-escalate
 #      signal, for a healthy crew), and head equality rejects precisely the
-#      live run whose lane head never reached this worktree. Where no run can
-#      be attributed at all, that is REPORTED as unknown rather than guessed
-#      from the status log (step 4).
+#      live run whose lane head never reached this worktree. A confirmed run
+#      of record that is terminal with a proven head mismatch is a KNOWN
+#      state, not an unresolved one, and falls through silently to step 4.
+#      Only a genuinely UNRESOLVED attribution - an unreadable or unconfirmed
+#      owner, or a same-branch row that does not bind - is REPORTED as unknown
+#      rather than guessed from the status log (step 4).
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -54,13 +57,16 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#      A run that EXISTS on this crew's branch but could not be attributed is
-#      NOT this case: the busy pane still answers (it is live evidence of the
+#      A run that EXISTS on this crew's branch but is left UNRESOLVED is NOT
+#      this case: the busy pane still answers (it is live evidence of the
 #      crew, not an inference about the run), but the status log does not.
 #      That reports unknown · run-step with the reason, because the log is an
 #      event history that may predate the run entirely, and a confident state
 #      for a crew whose validation is in an unknown condition is the failure
-#      this helper exists to prevent.
+#      this helper exists to prevent. A confirmed run of record that is
+#      terminal with a proven head mismatch is a KNOWN state, not this one, so
+#      it reaches the pane and status log exactly as it did before ownership
+#      existed.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -539,7 +545,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     # branch (fm_nm_run_branch_ownership in bin/fm-nm-run-lib.sh). It is the
     # only non-inferred answer available, so it outranks both the head rule
     # and the coarse list.
-    #   owned   - attribute it, no head check.
+    #   owned   - attribute it if active or head-matching; a terminal head
+    #             mismatch is a known state and falls through instead (see
+    #             the owned branch below).
     #   foreign - `axi status` answered with a superseded run. Ask the named
     #             owner directly instead; never fall to the coarse list, whose
     #             every same-branch row is older and therefore also superseded.
