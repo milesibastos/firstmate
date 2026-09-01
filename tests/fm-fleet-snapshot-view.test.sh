@@ -916,6 +916,67 @@ test_cancelled_snapshot_stops_the_work_it_started() {
   pass "cancelling a snapshot stops the per-task reads it started"
 }
 
+# The pid-directed test above is not enough on its own: it is exactly the gap
+# that let per-task workers share the caller's process group reach the review
+# gate once already. fm-home-summary-refresh.sh's --_worker mode is bounded by
+# fm_run_timed, and every mechanism that library uses terminates the whole
+# process GROUP, not just the pid it holds. This test cancels the same way:
+# by signalling the snapshot's own process group, never a pid or group we did
+# not create ourselves.
+test_cancelled_snapshot_group_signal_stops_the_work_it_started() {
+  local home markers fakebin pid i started completed alive p before monitor_was_on=0
+  local read_secs=2 observe=5
+  home=$(make_home cancel-group)
+  markers="$home/markers"
+  mkdir -p "$markers"
+  for i in 1 2 3 4; do write_slow_task "$home" "task$i"; done
+  fakebin=$(make_slow_fakebin "$home" "$markers" "$read_secs")
+
+  # `set -m` so the job launched below becomes its own process-group leader;
+  # its pid and pgid are the same value, which is the only pgid this test ever
+  # derives or signals - never one looked up by pattern or found via ps|grep.
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_CANCEL_GRACE=2 \
+    "$SNAPSHOT" --json >/dev/null 2>&1 &
+  pid=$!
+  [ "$monitor_was_on" -eq 1 ] || set +m
+
+  for i in $(seq 60); do
+    [ "$(count_markers "$markers" started)" -gt 0 ] && break
+    sleep 0.1
+  done
+  started=$(count_markers "$markers" started)
+  [ "$started" -gt 0 ] || fail "fixture never started a per-task read; the test would be vacuous"
+  [ "$(count_markers "$markers" completed)" -eq 0 ] \
+    || fail "fixture read finished before the abort; the test would be vacuous"
+
+  # Record the tree while it is still reachable, rooted at the pid this test
+  # started and holds directly; used only to check liveness after the grace.
+  alive=$(bash -c '. "$1/bin/fm-cancel-lib.sh"; fm_cancel_tree_pids "$2"' _ "$ROOT" "$pid")
+
+  before=$(count_markers "$markers" completed)
+
+  # What fm_run_timed's own bound does on expiry: signal the process GROUP, not
+  # the pid. The group id is the pid this test holds, because `set -m` made the
+  # job its own group leader above.
+  kill -TERM -- "-$pid" 2>/dev/null || fail "could not signal the snapshot's process group"
+
+  sleep "$observe"
+
+  completed=$(count_markers "$markers" completed)
+  [ "$completed" -le "$before" ] \
+    || fail "group-signalled snapshot let $((completed - before)) per-task read(s) complete AFTER the abort"
+
+  kill -0 "$pid" 2>/dev/null && fail "snapshot process survived its own group cancellation"
+  for p in $alive; do
+    if kill -0 "$p" 2>/dev/null; then
+      fail "a process the group-cancelled snapshot started is still running past the grace period"
+    fi
+  done
+  pass "cancelling a snapshot by process group stops the per-task reads it started"
+}
+
 # Scratch space is optional. The snapshot needed none before the fan-out existed
 # and still runs where there is none, which is not hypothetical: the perl-timeout
 # fixture in tests/fm-bearings-snapshot.test.sh runs it on a PATH built from an
@@ -1016,6 +1077,7 @@ test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
 test_cancelled_snapshot_stops_the_work_it_started
+test_cancelled_snapshot_group_signal_stops_the_work_it_started
 test_uncancelled_snapshot_completes_its_reads
 test_cancel_library_refuses_a_root_it_does_not_own
 test_cancel_library_clears_a_tree_it_owns

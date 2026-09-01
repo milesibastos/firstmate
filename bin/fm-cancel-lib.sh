@@ -40,6 +40,16 @@
 # holds a handle to - a `$!` it recorded, never a pid it looked up. Anything
 # whose parent chain reaches that pid is the caller's own work by construction.
 #
+# That proof has an expiry a caller must respect: a root only proves ownership
+# while it is still in flight. The instant a caller's own `wait` has reaped a
+# root, the pid is dead and the OS is free to hand it to something else; from
+# that moment the recorded pid proves nothing. A caller must therefore drop
+# every pid from its recorded set as soon as it is reaped, and pass this
+# library only roots still genuinely in flight - never a pid kept around as a
+# history of what once ran. Passing a reaped pid back in here is the same
+# identity violation as pattern matching: this library would still walk from it
+# and sign whatever the OS has since made of it.
+#
 # Two things are therefore forbidden here, and both are forbidden because they
 # select processes this library cannot prove it owns:
 #

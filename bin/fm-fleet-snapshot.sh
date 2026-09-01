@@ -8,9 +8,14 @@
 #
 # Cancellation: the per-task reads stop when the caller does. On TERM, INT, or
 # HUP the fan-out in flight is stopped within FM_SNAPSHOT_CANCEL_GRACE seconds
-# and the command exits 143, 130, or 129. That is the half worth having, because
-# consumers time this command out and those reads are bounded inside their own
-# process groups, beyond the reach of a signal sent to this pid.
+# and the command exits 143, 130, or 129. That holds for a signal sent to this
+# pid AND for a signal sent to this process's GROUP, because each per-task
+# worker is isolated into its own process group before it runs - see
+# task_json_lines_parallel. A caller that bounds this command with a
+# process-group-directed timeout (fm-timeout-lib.sh's own mechanism, which is
+# how bin/fm-home-summary-refresh.sh's --_worker mode is bounded) therefore
+# cannot reach the workers directly either; only this script's own
+# freeze-then-signal path can.
 #
 # Two gaps are deliberate, and the claim above is scoped to exclude them. The
 # registered-secondmate aggregation still runs inside a command substitution,
@@ -20,7 +25,14 @@
 # grace. Closing that means restructuring a second phase, and it is neither
 # where the cost was measured nor where the orphans were observed. SIGKILL is
 # the other: it cannot be trapped, so a consumer that needs cancellation must
-# send a catchable signal.
+# send a catchable signal. Isolating each worker into its own process group
+# carries a cost inside this same exclusion: an outer GROUP signal used to
+# reach the workers incidentally even when this script's own trap never ran.
+# Now it cannot. That is strictly better for TERM/INT/HUP, because this
+# script's own trap runs instead and freeze-then-signal stops the work
+# properly - but if fm-fleet-snapshot.sh itself is SIGKILLed, its trap never
+# runs, and the isolated workers are now orphaned rather than incidentally
+# caught by the outer group signal.
 #
 # Top-level fields:
 #   schema: stable schema id.
@@ -212,6 +224,13 @@ validate_positive_bound FM_SNAPSHOT_CANCEL_GRACE "$FM_SNAPSHOT_CANCEL_GRACE"
 # So the slow section runs as background jobs in this shell and is collected
 # with `wait`, never inside `$(...)`. SNAPSHOT_CHILD_PIDS holds a `$!` for each,
 # which is the only ownership proof fm-cancel-lib.sh accepts.
+#
+# SNAPSHOT_CHILD_PIDS is a LIVE-OWNERSHIP set, not a history: it is cleared
+# immediately after each `wait` reaps its batch, because a reaped pid is not
+# proof of anything once it can have been recycled by the OS. A stale pid left
+# in the set after its process exited would let a later signal reach whatever
+# process the OS has since given that pid - the identity violation
+# fm-cancel-lib.sh's header exists to prevent.
 SNAPSHOT_WORKDIR=
 SNAPSHOT_CHILD_PIDS=()
 
@@ -551,7 +570,6 @@ task_json_one() {  # <meta>
 
   [ -e "$meta" ] || return 0
   id=$(basename "$meta" .meta)
-  id=$(basename "$meta" .meta)
   kind=$(meta_value "$meta" kind)
   [ -n "$kind" ] || kind=ship
   harness=$(meta_value "$meta" harness)
@@ -769,14 +787,24 @@ task_json_lines_serial() {
 }
 
 task_json_lines_parallel() {
-  local meta pid launched=0 batch=0
+  local meta pid launched=0 batch=0 monitor_was_on=0
 
+  # Give every worker its OWN process group, mirroring fm_run_bash_timeout in
+  # fm-timeout-lib.sh, so an outer process-GROUP signal (how fm_run_timed
+  # bounds a caller, per that library's own header) cannot reach these workers
+  # at all. Only this script's own freeze-then-signal path may ever touch them.
+  # Scoped tightly to the spawn-and-wait loop below; restored right after.
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     launched=$((launched + 1))
     # A worker must not inherit the cancellation traps: its EXIT handler would
-    # delete the working directory its siblings are still writing into.
+    # delete the working directory its siblings are still writing into. It also
+    # drops monitor mode first, as fm_run_bash_timeout's own child does, so its
+    # descendants do not each get further new process groups of their own.
     (
+      set +m
       trap - TERM INT HUP EXIT
       task_json_one "$meta"
     ) > "$SNAPSHOT_WORKDIR/task-$launched.json" 2>/dev/null &
@@ -789,10 +817,17 @@ task_json_lines_parallel() {
       # A worker that failed leaves an empty file and its row simply drops out
       # at the assembly below, which is what the serial loop did too.
       wait || true
+      # SNAPSHOT_CHILD_PIDS is a live-ownership set: once `wait` has reaped this
+      # batch, none of these pids are proof of anything anymore.
+      SNAPSHOT_CHILD_PIDS=()
       batch=0
     fi
   done
-  [ "$batch" -eq 0 ] || wait || true
+  if [ "$batch" -ne 0 ]; then
+    wait || true
+    SNAPSHOT_CHILD_PIDS=()
+  fi
+  [ "$monitor_was_on" -eq 1 ] || set +m
 
   if [ "$launched" -eq 0 ]; then
     printf '[]\n'
