@@ -111,6 +111,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | result identity and ordering | each wake names the committed sequence to read, and pending sequences 1, 2, and 10 publish in numeric order |
 | one owner per canonical source | a second home's `start` for the same source id reports `already owned` and publishes nothing |
 | canonical physical identity | a final-component symlink and its target produce the same Lavish source id |
+| symlinked state root parity | a state root reached through a symlinked ancestor claims like one reached directly and records the same physical state root, while a `..` that resolves through a symlink to a directory its lexical spelling never names still stays rejected |
 | isolated public start boundary | direct `start` establishes a new runner-led process group before claiming the source, so retirement cannot signal an unrelated process inherited from the caller's group |
 | stale reclaim without displacement | concurrent contenders replacing one stale claim start exactly one runner, and cross-home replacement removes the old generation's staging file from its recorded state directory |
 | crashed leader with a live owned group | `SIGKILL` on only the runner leader leaves its blocking child group alive; reconcile then stops that surviving group before any replacement starts, never leaves two source processes running for one canonical source, and a generation with no leader and no surviving group is still reclaimed |
