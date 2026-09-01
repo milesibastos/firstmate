@@ -94,6 +94,19 @@ write_origin_meta() {  # <home> <id> [kind]
     "spawn_gen=fixture-$id"
 }
 
+# Every test runs with the suite's own shell options: `set -u` and no errexit.
+# A test that flips errexit on - typically by "restoring" it with `set -e` after
+# a `set +e` borrowed from an errexit suite - silently changes every LATER test,
+# turning the first tolerated nonzero command into an abort that prints no
+# `not ok` line at all. That is indistinguishable from a flake by exit code
+# alone, so assert the invariant after each test and name the test that broke it.
+run_test() {  # <test-function>
+  "$1"
+  case $- in
+    *e*) fail "errexit leaked out of $1: later tests would abort silently instead of reporting" ;;
+  esac
+}
+
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved captain call is report
 # prose, no held backlog item or open status exists, and the authoritative
@@ -128,10 +141,8 @@ EOF
       and (.reports | any(.id == "sample-route-review"))
   ' >/dev/null || fail "the pre-policy omission shape was not reproduced: $json"
 
-  set +e
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"
   rc=$?
-  set -e
   [ "$rc" -ne 0 ] || fail "completed investigation teardown erased a report-only unresolved captain call"
   assert_present "$home/state/$id.meta" "refused completion must preserve investigation metadata"
   assert_grep "REFUSED" "$home/teardown.err" "refusal must be explicit"
@@ -335,8 +346,10 @@ test_release_frees_held_work() {
   assert_contains "$show" "held: no" "a mismatched release replay re-held the work item"
 
   tasks_in "$home" add sample-empty-label-widget "Ship without a display label" \
-    --kind ship --repo sample >/dev/null
-  run_captain "$home" hold sample-empty-label-widget --reason "captain go needed" >/dev/null
+    --kind ship --repo sample >/dev/null \
+    || fail "setup: could not create the unlabelled work item"
+  run_captain "$home" hold sample-empty-label-widget --reason "captain go needed" >/dev/null \
+    || fail "setup: could not hold the unlabelled work item"
   out=$(printf 'sample-empty-label-widget\tgo\t\trelease\n' \
     | run_captain "$home" answers --source "empty-label release fixture") \
     || fail "an empty answer label shifted the release close mode"
@@ -475,8 +488,10 @@ test_out_of_band_close_is_recordable() {
 
   # An ordinary finished task was never the captain's item; recording an
   # invented answer on it must be refused.
-  tasks_in "$home" add sample-ordinary-work "Ordinary finished work" --kind ship --repo sample >/dev/null
-  tasks_in "$home" "done" sample-ordinary-work >/dev/null
+  tasks_in "$home" add sample-ordinary-work "Ordinary finished work" --kind ship --repo sample >/dev/null \
+    || fail "setup: could not create the ordinary work item"
+  tasks_in "$home" "done" sample-ordinary-work >/dev/null \
+    || fail "setup: could not finish the ordinary work item"
   printf 'An answer the captain never gave.\n' > "$home/invented.txt"
   if run_captain "$home" answer sample-ordinary-work --decision-file "$home/invented.txt" \
     > "$home/never-held.out" 2> "$home/never-held.err"; then
@@ -494,7 +509,8 @@ test_visual_review_uses_shared_completion_owner() {
   home=$(make_home visual-review)
   id=sample-board-review
   mkdir -p "$home/data/$id"
-  tasks_in "$home" add "$id" "Review the sample board" --kind scout --repo sample --start >/dev/null
+  tasks_in "$home" add "$id" "Review the sample board" --kind scout --repo sample --start >/dev/null \
+    || fail "setup: could not create the board review origin"
   write_origin_meta "$home" "$id"
   printf 'done: investigation complete\n' > "$home/state/$id.status"
   printf '# Sample board investigation\n\nThe initial findings need no captain choice.\n' > "$home/data/$id/report.md"
@@ -502,7 +518,8 @@ test_visual_review_uses_shared_completion_owner() {
     || fail "initial investigation could not pass the shared completion owner"
   run_teardown "$home" "$id" >/dev/null 2> "$home/visual-teardown.err" \
     || fail "completed investigation teardown failed: $(cat "$home/visual-teardown.err")"
-  tasks_in "$home" "done" "$id" --report "data/$id/report.md" --keep 0 >/dev/null
+  tasks_in "$home" "done" "$id" --report "data/$id/report.md" --keep 0 >/dev/null \
+    || fail "setup: could not finish the board review origin"
 
   mkdir -p "$home/.lavish"
   printf '<html><body>Synthetic sample board</body></html>\n' > "$home/.lavish/sample-board.html"
@@ -525,7 +542,8 @@ test_none_inventory_and_resolved_prose_do_not_create_holds() {
   home=$(make_home no-false-holds)
   id=sample-resolved-review
   mkdir -p "$home/data/$id"
-  tasks_in "$home" add "$id" "Review a resolved sample finding" --kind scout --repo sample --start >/dev/null
+  tasks_in "$home" add "$id" "Review a resolved sample finding" --kind scout --repo sample --start >/dev/null \
+    || fail "setup: could not create the resolved-finding review origin"
   write_origin_meta "$home" "$id"
   printf 'resolved [key=old-choice]: the sample choice was already recorded\ndone: report complete\n' \
     > "$home/state/$id.status"
@@ -549,7 +567,8 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   home=$(make_home stale-terminal-decision)
   id=sample-terminal-review
   mkdir -p "$home/data/$id"
-  tasks_in "$home" add "$id" "Review a terminal sample finding" --kind scout --repo sample --start >/dev/null
+  tasks_in "$home" add "$id" "Review a terminal sample finding" --kind scout --repo sample --start >/dev/null \
+    || fail "setup: could not create the terminal-finding review origin"
   write_origin_meta "$home" "$id"
   printf 'needs-decision [key=default]: choose route A or route B\ndone: report complete\n' \
     > "$home/state/$id.status"
@@ -594,7 +613,8 @@ EOF
   fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
   origin=sample-mate-review
   mkdir -p "$mate/data/$origin"
-  tasks_in "$mate" add "$origin" "Investigate secondmate sample" --kind scout --repo sample --start >/dev/null
+  tasks_in "$mate" add "$origin" "Investigate secondmate sample" --kind scout --repo sample --start >/dev/null \
+    || fail "setup: could not create the secondmate review origin"
   write_origin_meta "$mate" "$origin"
   printf 'done: report and visual review complete\n' > "$mate/state/$origin.status"
   printf '# Sample secondmate review\n\nOne captain choice remains.\n' > "$mate/data/$origin/report.md"
@@ -605,7 +625,8 @@ EOF
     || fail "secondmate-owned completion failed"
   run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
     || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
-  tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
+  tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null \
+    || fail "setup: could not finish the secondmate review origin"
 
   printf -- '- sample-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
     "$mate" > "$parent/data/secondmates.md"
@@ -636,16 +657,22 @@ test_bound_channel_answers_close_at_answer_time() {
   printf 'done: proposal deck ready for the captain\n' > "$home/state/$id.status"
   printf '# Sample eval proposal\n\nThree captain choices remain.\n' > "$home/data/$id/report.md"
   run_captain "$home" hold sample-membership-call --title "Captain call: membership" \
-    --reason "captain membership choice pending" --repo sample --origin "$id" >/dev/null
+    --reason "captain membership choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "setup: could not register the membership call"
   run_captain "$home" hold sample-headline-call --title "Captain call: headline" \
-    --reason "captain headline choice pending" --repo sample --origin "$id" >/dev/null
+    --reason "captain headline choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "setup: could not register the headline call"
   run_captain "$home" hold sample-forged-call --title "Captain call: forged" \
-    --reason "captain forged choice pending" --repo sample --origin "$id" >/dev/null
+    --reason "captain forged choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "setup: could not register the forged call"
   run_captain "$home" hold sample-invalid-close-call --title "Captain call: invalid close" \
-    --reason "captain close mode validation pending" --repo sample --origin "$id" >/dev/null
+    --reason "captain close mode validation pending" --repo sample --origin "$id" >/dev/null \
+    || fail "setup: could not register the invalid-close call"
   tasks_in "$home" add sample-gated-work "Gated sample work" --kind ship --repo sample \
-    --body 'Gated work plan.' >/dev/null
-  run_captain "$home" hold sample-gated-work --reason "captain go needed" >/dev/null
+    --body 'Gated work plan.' >/dev/null \
+    || fail "setup: could not create the gated work item"
+  run_captain "$home" hold sample-gated-work --reason "captain go needed" >/dev/null \
+    || fail "setup: could not hold the gated work item"
   run_captain "$home" complete "$id" \
     sample-membership-call sample-headline-call sample-forged-call sample-invalid-close-call \
     sample-gated-work >/dev/null \
@@ -709,7 +736,8 @@ SH
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$home/adapter-root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
-    "$ROOT/bin/fm-procevent.sh" start fixture-src >/dev/null 2>&1
+    "$ROOT/bin/fm-procevent.sh" start fixture-src > "$home/start.out" 2>&1 \
+    || fail "the fixture channel could not run its blocking capture: $(cat "$home/start.out")"
   assert_absent "$home/state/procevent-inbox/fixture-src.1.handled" \
     "feeding a captain answer retired the notification firstmate still needs"
   assert_present "$home/state/procevent-inbox/fixture-src.1.result" \
@@ -732,11 +760,9 @@ SH
 
   # Replaying the same capture is a no-op, not a rejected different decision. A
   # run that could not close every answered key still reports nonzero.
-  set +e
   out=$(run_lavish "$home" answers "$result" \
     | run_captain "$home" answers --source "the captured result fixture-src sequence 1" 2>&1)
   rc=$?
-  set -e
   [ "$rc" -ne 0 ] || fail "a run that skipped a key reported success"
   assert_contains "$out" "closed: sample-membership-call" \
     "replaying an identical capture was not idempotent: $out"
@@ -787,10 +813,8 @@ session:
 prompts[1]{uid,prompt,selector,tag,text}:
   "2","Only choice: yes\n\nContext data:\n{\n  \"question\": \"sample-only-call\",\n  \"answer\": \"yes\"\n}","form",choice,"Only choice: yes"
 EOF
-  set +e
   out=$(run_captain "$home" binding "$sid" 2>&1)
   rc=$?
-  set -e
   [ "$rc" -ne 0 ] || fail "an unbound source reported a binding"
   [ -z "$out" ] || fail "an unbound source printed a binding: $out"
   show=$(tasks_in "$home" show sample-only-call --full)
@@ -807,7 +831,8 @@ test_legacy_identities_keep_working() {
   home=$(make_home legacy-compat)
   id=sample-legacy-review
   mkdir -p "$home/data/$id"
-  tasks_in "$home" add "$id" "Legacy-shaped review" --kind scout --repo sample --start >/dev/null
+  tasks_in "$home" add "$id" "Legacy-shaped review" --kind scout --repo sample --start >/dev/null \
+    || fail "setup: could not create the legacy review origin"
   write_origin_meta "$home" "$id"
   printf 'done: report complete\n' > "$home/state/$id.status"
   printf '# Legacy review\n\nTwo captain choices remain.\n' > "$home/data/$id/report.md"
@@ -833,9 +858,11 @@ test_legacy_identities_keep_working() {
   # The shim's routed close records the routed work inside the captain decision
   # and clears the recorded edge.
   tasks_in "$home" add sample-legacy-work "Apply the legacy choice" \
-    --kind ship --repo sample --blocked-by "$hold" >/dev/null
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "setup: could not create the routed legacy work item"
   tasks_in "$home" add sample-unrouted-work "Unrouted legacy work" \
-    --kind ship --repo sample >/dev/null
+    --kind ship --repo sample >/dev/null \
+    || fail "setup: could not create the unrouted legacy work item"
   printf 'Use route north.\n' > "$home/route.txt"
   if run_shim "$home" resolve "$id" pick-one --decision-file "$home/route.txt" \
     --routed-to sample-missing-work > "$home/missing-route.out" 2> "$home/missing-route.err"; then
@@ -859,9 +886,11 @@ test_legacy_identities_keep_working() {
   assert_contains "$show" "blocked: no" "the shim resolve did not release the routed work"
 
   old_hold=$(run_shim "$home" hold "$id" old-route \
-    --title "Old routed choice" --reason "captain old route pending" --repo sample)
+    --title "Old routed choice" --reason "captain old route pending" --repo sample) \
+    || fail "setup: could not register the old routed call"
   tasks_in "$home" add sample-old-routed-work "Apply the old routed choice" \
-    --kind ship --repo sample --blocked-by "$old_hold" >/dev/null
+    --kind ship --repo sample --blocked-by "$old_hold" >/dev/null \
+    || fail "setup: could not create the old routed work item"
   printf 'Use the historical route.\n' > "$home/old-route.txt"
   legacy_text=$(cat "$home/old-route.txt")
   if command -v shasum >/dev/null 2>&1; then
@@ -871,7 +900,8 @@ test_legacy_identities_keep_working() {
   fi
   printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: sample-old-routed-work\nResolution mode: routed\n\nCaptain decision:\n%s\n\nRouted work:\n- sample-old-routed-work\n' \
     "$legacy_digest" "$legacy_text" > "$home/old-route-body.txt"
-  tasks_in "$home" update "$old_hold" --body-file "$home/old-route-body.txt" --archive-body >/dev/null
+  tasks_in "$home" update "$old_hold" --body-file "$home/old-route-body.txt" --archive-body >/dev/null \
+    || fail "setup: could not archive the old routed body"
   run_shim "$home" resolve "$id" old-route --decision-file "$home/old-route.txt" \
     --routed-to sample-old-routed-work >/dev/null \
     || fail "the shim did not replay a matching pre-collapse routed record"
@@ -890,7 +920,8 @@ test_legacy_identities_keep_working() {
   # A concrete-origin binding (a pre-collapse record) makes short channel keys
   # resolve through the composed identity.
   run_shim "$home" hold "$id" third-choice \
-    --title "Third choice" --reason "captain third choice pending" --repo sample >/dev/null
+    --title "Third choice" --reason "captain third choice pending" --repo sample >/dev/null \
+    || fail "setup: could not register the legacy third choice"
   run_shim "$home" bind legacy-src "$id" >/dev/null || fail "the shim bind path failed"
   [ "$(run_captain "$home" binding legacy-src)" = "$id" ] \
     || fail "the concrete-origin binding was not preserved"
@@ -902,7 +933,8 @@ test_legacy_identities_keep_working() {
   assert_contains "$show" "state: done" "the legacy-keyed answer did not close its row"
 
   run_shim "$home" hold "$id" fourth-choice \
-    --title "Fourth choice" --reason "captain fourth choice pending" --repo sample >/dev/null
+    --title "Fourth choice" --reason "captain fourth choice pending" --repo sample >/dev/null \
+    || fail "setup: could not register the legacy fourth choice"
   legacy_text=$(printf 'Captain answered this decision through legacy replay.\nDecision key: fourth-choice\nAnswer: option c\n')
   if command -v shasum >/dev/null 2>&1; then
     legacy_digest=$(printf '%s' "$legacy_text" | shasum -a 256 | awk '{print $1}')
@@ -911,8 +943,10 @@ test_legacy_identities_keep_working() {
   fi
   printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nRouted identities: none\nResolution mode: answered\n\nCaptain decision:\n%s\n' \
     "$legacy_digest" "$legacy_text" > "$home/legacy-body.txt"
-  tasks_in "$home" update "$id-decision-fourth-choice" --body-file "$home/legacy-body.txt" --archive-body >/dev/null
-  tasks_in "$home" "done" "$id-decision-fourth-choice" >/dev/null
+  tasks_in "$home" update "$id-decision-fourth-choice" --body-file "$home/legacy-body.txt" --archive-body >/dev/null \
+    || fail "setup: could not archive the legacy fourth-choice body"
+  tasks_in "$home" "done" "$id-decision-fourth-choice" >/dev/null \
+    || fail "setup: could not finish the legacy fourth-choice call"
   out=$(printf 'fourth-choice\toption c\t\n' \
     | run_captain "$home" answers "$id" --source "legacy replay") \
     || fail "an identical pre-collapse keyed answer was not idempotent"
@@ -1168,20 +1202,20 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
-test_uninventoried_report_decision_refuses_completion
-test_completion_gate_attests_and_transfers
-test_answer_records_and_closes
-test_release_frees_held_work
-test_deferral_leaves_captains_call_until_due
-test_out_of_band_close_is_recordable
-test_visual_review_uses_shared_completion_owner
-test_none_inventory_and_resolved_prose_do_not_create_holds
-test_terminal_single_owner_status_decision_does_not_block_empty_inventory
-test_secondmate_hold_stays_in_authoritative_home
-test_bound_channel_answers_close_at_answer_time
-test_unbound_source_closes_no_hold
-test_legacy_identities_keep_working
-test_chat_channel_feeds_the_same_keyed_answer_intake
-test_origin_slug_validation_precedes_path_construction
-test_status_resolution_over_an_open_hold_is_signalled
-test_legitimate_holds_produce_no_divergence_signal
+run_test test_uninventoried_report_decision_refuses_completion
+run_test test_completion_gate_attests_and_transfers
+run_test test_answer_records_and_closes
+run_test test_release_frees_held_work
+run_test test_deferral_leaves_captains_call_until_due
+run_test test_out_of_band_close_is_recordable
+run_test test_visual_review_uses_shared_completion_owner
+run_test test_none_inventory_and_resolved_prose_do_not_create_holds
+run_test test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+run_test test_secondmate_hold_stays_in_authoritative_home
+run_test test_bound_channel_answers_close_at_answer_time
+run_test test_unbound_source_closes_no_hold
+run_test test_legacy_identities_keep_working
+run_test test_chat_channel_feeds_the_same_keyed_answer_intake
+run_test test_origin_slug_validation_precedes_path_construction
+run_test test_status_resolution_over_an_open_hold_is_signalled
+run_test test_legitimate_holds_produce_no_divergence_signal
