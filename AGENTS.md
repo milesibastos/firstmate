@@ -114,7 +114,7 @@ state/               runtime records and signals; gitignored
   .branch-eligible-rows .branch-eligible-owner .main-eligible-rows  per-actor wake-row claims and branch-owner evidence; docs/watcher-continuity.md owns the acknowledgement contract
   .lease-<task>        per-task supervision lease naming which actor (main or branch) may change that task; bin/fm-lease-lib.sh owns the contract the guarded scripts enforce
   fleet-snapshot.json  the cadence-published fleet snapshot, byte-identical to bin/fm-fleet-snapshot.sh --json; present only when this home opted in, replaced atomically, and left stale rather than removed when a read fails (bin/fm-fleet-publish.sh)
-  .fleet-publish-daemon .fleet-publish-beat .fleet-publish.lock .fleet-publish-daemon.lock .fleet-publish.log  snapshot publisher record, liveness beacon, publication and singleton locks, and bounded failure log; never touch
+  .fleet-publish-daemon .fleet-publish-beat .fleet-publish.lock .fleet-publish-daemon.lock .fleet-publish.log .fleet-publish-launch.err  snapshot publisher record, liveness beacon, publication and singleton locks, bounded failure log, and the launcher's captured stderr from its latest launch attempt; never touch
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh

@@ -29,10 +29,14 @@
 #   - There is no launchd, cron, or systemd unit anywhere in bin/. Firstmate does
 #     not install host-level timers, and adding one for a snapshot would put a
 #     unit outside the operational home that no `fm-` command owns.
-# What DOES fit is the detach shape bin/fm-startup-network.sh already proved for
-# work that must outlive the shell that launched it: SIGHUP ignored in the child
-# before it execs, its own process group, stdio detached. This script reuses
-# that shape and adds only the loop.
+# What DOES fit is the detach pattern bin/fm-startup-network.sh already proved
+# for work that must outlive the shell that launched it: immunity to the
+# launching shell's HUP, its own process group, stdio detached. That script
+# gets the first property from nohup; this one ignores SIGHUP directly in a
+# subshell before it execs instead, because nohup aborts in a console-less
+# shell (the sandbox this script is tested in) and a direct trap keeps the
+# launcher itself testable rather than hidden behind a shim. This script
+# reuses the pattern and adds only the loop.
 # Its write path is bin/fm-home-summary-refresh.sh's publication contract
 # (serialize, validate, rename), applied to the canonical snapshot.
 #
@@ -760,12 +764,13 @@ cmd_start() {
     2) start_refuse_stale "$pid" "$age"; return 1 ;;
   esac
 
-  # Detached the same three ways bin/fm-startup-network.sh detaches its worker:
-  # stdio to /dev/null so no caller's pipe is held open, SIGHUP ignored in the
-  # child before it execs so the publisher outlives the shell that launched it,
-  # and its own process group so a bounded caller's group teardown cannot take
-  # the publisher down with it. Together those are what let the artifact keep
-  # advancing after the agent that armed it is gone.
+  # Detached the same three properties bin/fm-startup-network.sh detaches its
+  # worker with: stdio to /dev/null so no caller's pipe is held open, immunity
+  # to the launching shell's HUP so the publisher outlives it (a SIGHUP-
+  # ignoring subshell here rather than that script's nohup, since nohup aborts
+  # in a console-less shell), and its own process group so a bounded caller's
+  # group teardown cannot take the publisher down with it. Together those are
+  # what let the artifact keep advancing after the agent that armed it is gone.
   # Launching is retried rather than attempted once. A publisher that is still
   # dying holds the singleton lock for a moment, so a child launched into that
   # window loses the race and exits; giving up there would leave a home that
