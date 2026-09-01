@@ -1742,4 +1742,76 @@ assert_not_contains "$runner_help" "exactly-once" \
   "the runner's help claims no exactly-once delivery"
 pass "the published interfaces state the loss limitation and claim no lossless delivery"
 
+# --- a state root reached through a symlink behaves exactly like a direct one -
+# The claim guard compares its state root's physical location against a purely
+# lexical normalization of the configured path. Those agree only while no
+# component is a symlink, so a home reached through one could never be claimed:
+# on macOS every $TMPDIR sits under /var, a symlink to /private/var, which made
+# this suite and the bearings board unrunnable there while CI stayed green
+# because /var is a real directory on Linux. The symlink below is built by the
+# test rather than inherited from the platform's temp directory, so this fails
+# before the fix and passes after it on every platform, including CI.
+SYM_ROOT="$TMP_ROOT/symlink-state-root"
+mkdir -p "$SYM_ROOT/real"
+ln -s "$SYM_ROOT/real" "$SYM_ROOT/link"
+
+DIRECT_HOME="$SYM_ROOT/real/direct"; new_home "$DIRECT_HOME"
+LINKED_HOME="$SYM_ROOT/link/linked"; new_home "$LINKED_HOME"
+
+for spelling in direct linked; do
+  case "$spelling" in
+    direct) home=$DIRECT_HOME ;;
+    linked) home=$LINKED_HOME ;;
+  esac
+  trigger="$TMP_ROOT/trigger-symlink-$spelling"
+  out=$(pe_register "$home" lavish "src-symlink-$spelling" -- "$BLOCKER" "$trigger" "payload")
+  assert_contains "$out" "registered: src-symlink-$spelling" \
+    "a source registers under a $spelling state root"
+  pe "$home" reconcile >/dev/null
+  # The blocker is left blocking on purpose: completion releases the claim, and
+  # the claim record is what the assertions below read.
+  wait_for "$FM_PROCEVENT_CLAIM_ROOT/src-symlink-$spelling.claim" \
+    || fail "reconcile never claimed the source under a $spelling state root"
+done
+
+# The recorded state root is the physical location under either spelling, so the
+# symlinked home's durable record is byte-identical in form to the direct one
+# rather than carrying the path the caller happened to type.
+direct_root=$(sed -n 8p "$FM_PROCEVENT_CLAIM_ROOT/src-symlink-direct.claim")
+linked_root=$(sed -n 8p "$FM_PROCEVENT_CLAIM_ROOT/src-symlink-linked.claim")
+real_root=$(cd -P -- "$SYM_ROOT/real" && pwd -P)
+[ "$direct_root" = "$real_root/direct/state" ] \
+  || fail "a direct state root recorded $direct_root, not $real_root/direct/state"
+[ "$linked_root" = "$real_root/linked/state" ] \
+  || fail "a symlinked state root recorded $linked_root, not $real_root/linked/state"
+pass "a state root reached through a symlink claims and records like a direct one"
+
+: > "$TMP_ROOT/trigger-symlink-direct"
+: > "$TMP_ROOT/trigger-symlink-linked"
+
+# A `..` that crosses a symlink still resolves somewhere the lexical path does
+# not name, and must stay rejected: accepting symlinked ancestors is what the
+# fix allows, not path traversal. The kernel resolves vialink/../decoy to
+# real/decoy component-by-component, not to the lexical decoy at $SYM_ROOT, so
+# that physical target must exist as its own real directory or the rejection
+# would come from a plain missing-directory check instead of the guard.
+mkdir -p "$SYM_ROOT/real/nested/deep" "$SYM_ROOT/real/decoy" "$SYM_ROOT/decoy"
+chmod 700 "$SYM_ROOT/real/nested/deep" "$SYM_ROOT/real/decoy" "$SYM_ROOT/decoy"
+ln -s "$SYM_ROOT/real/nested" "$SYM_ROOT/vialink"
+[ -d "$SYM_ROOT/vialink/../decoy" ] \
+  || fail "the .. crossing a symlink does not resolve to a real directory"
+traversal_verdict=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c '
+  . "$1/bin/fm-pr-lib.sh"
+  . "$1/bin/fm-procevent-lib.sh"
+  fm_procevent_private_directory_valid "$2" 0 && echo accepted || echo rejected
+  fm_procevent_private_directory_valid "$3" 0 && echo accepted || echo rejected
+' _ "$ROOT" "$SYM_ROOT/vialink/../decoy" "$SYM_ROOT/vialink/deep")
+assert_contains "$traversal_verdict" "rejected" \
+  "a .. crossing a symlink is still refused"
+[ "$(printf '%s\n' "$traversal_verdict" | sed -n 1p)" = rejected ] \
+  || fail "a .. crossing a symlink was accepted"
+[ "$(printf '%s\n' "$traversal_verdict" | sed -n 2p)" = accepted ] \
+  || fail "a plain symlinked ancestor was refused"
+pass "symlinked ancestors are accepted while .. across a symlink stays refused"
+
 printf '\nall procevent tests passed\n'
