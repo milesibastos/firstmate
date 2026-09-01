@@ -403,19 +403,10 @@ record_field() {  # <name>
   LC_ALL=C sed -n "s/^$1=\\(.*\\)$/\\1/p" "$DAEMON_RECORD" 2>/dev/null | head -1
 }
 
-# daemon_alive: 0 when this home's publisher is genuinely running.
-#
-# Liveness must bind IDENTITY, not merely freshness. A pid plus a fresh beacon is
-# not proof: if the publisher dies just after a beat and the kernel hands its pid
-# to an unrelated process while that beacon is still inside the grace window, a
-# freshness-only check calls that unrelated process the publisher. The two
-# consequences are both bad - `start` reports "already running" and silently
-# declines to recover, freezing the very surface this script exists to keep
-# current, and `stop` sends SIGTERM to a process that has nothing to do with
-# firstmate. Shortening the grace window only makes that race rarer; it stays
-# wrong, so the window is not the fix.
-#
-# Four facts must therefore agree, and each rules out a different impostor:
+# daemon_identity: 0 when DAEMON_RECORD's pid is genuinely THIS home's publisher.
+# This answers identity alone - "is the recorded holder who it claims to be" -
+# and says nothing about whether it is still making progress. Four facts must
+# agree, and each rules out a different impostor:
 #   1. the recorded pid is alive                  - it exists at all;
 #   2. its kernel start time equals the recorded  - it is the SAME process, not a
 #      one, so a recycled pid cannot pass           later tenant of that number;
@@ -425,14 +416,13 @@ record_field() {  # <name>
 #                                                   beacon was written by a live
 #                                                   instance rather than left
 #                                                   behind by a dead one.
-# Only then does beacon freshness answer the remaining question, which is
-# progress rather than identity. A record written before identity binding existed
-# lacks the token and start time; it is treated as unprovable and therefore not
-# alive, so recovery runs. That direction is deliberate: an extra start attempt is
-# harmless because the singleton lock admits one daemon, while a false "already
-# running" loses publication silently.
-daemon_alive() {
-  local pid mtime now age recorded_token recorded_start live_start beacon_token
+# daemon_alive adds the freshness gate on top of this; cmd_run's lock-steal
+# guard calls this directly because a steal decision must not depend on how
+# recently the genuine publisher happened to beat. Every other caller goes
+# through daemon_alive, so freshness stays a single owner rather than a
+# divergent second copy of these four facts.
+daemon_identity() {
+  local pid recorded_token recorded_start live_start beacon_token
   pid=$(record_pid) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   recorded_token=$(record_field token) || return 1
@@ -444,6 +434,31 @@ daemon_alive() {
   proc_is_publisher "$pid" || return 1
   beacon_token=$(head -n 1 "$BEACON" 2>/dev/null || true)
   [ "$beacon_token" = "$recorded_token" ] || return 1
+  printf '%s\n' "$pid"
+  return 0
+}
+
+# daemon_alive: 0 when this home's publisher is genuinely running AND making
+# progress.
+#
+# Liveness must bind IDENTITY, not merely freshness. A pid plus a fresh beacon is
+# not proof: if the publisher dies just after a beat and the kernel hands its pid
+# to an unrelated process while that beacon is still inside the grace window, a
+# freshness-only check calls that unrelated process the publisher. The two
+# consequences are both bad - `start` reports "already running" and silently
+# declines to recover, freezing the very surface this script exists to keep
+# current, and `stop` sends SIGTERM to a process that has nothing to do with
+# firstmate. Shortening the grace window only makes that race rarer; it stays
+# wrong, so the window is not the fix. daemon_identity above proves identity;
+# only once that holds does beacon freshness answer the remaining question,
+# which is progress rather than identity. A record written before identity
+# binding existed lacks the token and start time; it is treated as unprovable
+# and therefore not alive, so recovery runs. That direction is deliberate: an
+# extra start attempt is harmless because the singleton lock admits one daemon,
+# while a false "already running" loses publication silently.
+daemon_alive() {
+  local pid mtime now age
+  pid=$(daemon_identity) || return 1
   mtime=$(path_mtime "$BEACON") || return 1
   case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
   now=$(now_epoch) || return 1
@@ -520,20 +535,41 @@ FLEET_PUBLISH_TOKEN=
 # that window sees no token and concludes the publisher is gone - which would
 # make a healthy publisher intermittently unrecoverable and intermittently
 # unstoppable. The rename also carries the mtime the freshness check reads.
+# Failure is reported honestly (non-zero) rather than swallowed: the beacon is
+# the one signal daemon_alive trusts to mean "making progress", so a heartbeat
+# that claims success when it did not write anything would let an unwritable or
+# full state directory present as a healthy publisher whose beacon merely ages.
 beat() {
   local tmp
-  tmp=$(umask 077; mktemp "$STATE/.fleet-publish-beat.XXXXXX" 2>/dev/null) || return 0
-  if printf '%s\n' "$FLEET_PUBLISH_TOKEN" > "$tmp" 2>/dev/null; then
-    mv -f -- "$tmp" "$BEACON" 2>/dev/null || rm -f -- "$tmp" 2>/dev/null || true
-  else
-    rm -f -- "$tmp" 2>/dev/null || true
+  tmp=$(umask 077; mktemp "$STATE/.fleet-publish-beat.XXXXXX" 2>/dev/null) || return 1
+  if printf '%s\n' "$FLEET_PUBLISH_TOKEN" > "$tmp" 2>/dev/null && mv -f -- "$tmp" "$BEACON" 2>/dev/null; then
+    return 0
   fi
-  return 0
+  rm -f -- "$tmp" 2>/dev/null || true
+  return 1
+}
+
+# beat_or_log: calls beat and logs the failure once when it starts, not on every
+# tick while it persists - a sustained outage should be one diagnosable line in
+# state/.fleet-publish.log, not a flood, and must never stop the publisher: a
+# transient write failure retiring the daemon would repeat the retire-on-one-
+# bad-look mistake already corrected for the cadence file.
+FLEET_PUBLISH_BEAT_FAILING=0
+beat_or_log() {
+  if beat; then
+    FLEET_PUBLISH_BEAT_FAILING=0
+    return 0
+  fi
+  if [ "$FLEET_PUBLISH_BEAT_FAILING" -eq 0 ]; then
+    FLEET_PUBLISH_BEAT_FAILING=1
+    log_failure "the beacon could not be written; the publisher is running but $BEACON is not being refreshed (state directory unwritable or full)"
+  fi
+  return 1
 }
 
 cmd_run() {
   local cadence rc slept slice record_tmp config_failures=0 daemon_pid daemon_proc_start
-  local alive holder_proven
+  local holder_pid holder_proven
   if ! mkdir -p "$STATE" 2>/dev/null; then
     printf 'fm-fleet-publish: state directory is unavailable: %s\n' "$STATE" >&2
     return 1
@@ -554,21 +590,27 @@ cmd_run() {
     # treats a lock as legitimately held whenever the recorded pid is merely
     # alive (fm_pid_alive) - it has no start-time or cmdline binding. A daemon
     # killed right after the kernel recycles its pid to an unrelated live
-    # process therefore still blocks recovery here even though daemon_alive
+    # process therefore still blocks recovery here even though daemon_identity
     # (which DOES bind identity) correctly reports no publisher running. This
     # guard closes that gap for THIS home's daemon lock only, by re-proving the
-    # lock's recorded holder with the same four-fact identity test daemon_alive
-    # uses before treating a failed acquire as proof a real publisher is up.
-    # Fixing fm_pid_alive/fm_lock_try_acquire itself is a separate task with a
-    # different blast radius (it also gates the watcher and every other home in
-    # the fleet) and is filed on its own; do not delete this guard as redundant
-    # when that lands, and do not assume it protects more than this one lock.
-    # A lock younger than FM_LOCK_STALE_AFTER is never condemned here, even when
-    # identity is unprovable: a publisher that just won the race has not yet had
-    # time to write its own record, and stealing that lock mid-startup would
-    # break the very mutual exclusion this lock exists to provide.
+    # lock's recorded holder with daemon_identity before treating a failed
+    # acquire as proof a real publisher is up. Fixing fm_pid_alive/
+    # fm_lock_try_acquire itself is a separate task with a different blast
+    # radius (it also gates the watcher and every other home in the fleet) and
+    # is filed on its own; do not delete this guard as redundant when that
+    # lands, and do not assume it protects more than this one lock.
+    # This proves IDENTITY ONLY, deliberately not daemon_alive's freshness gate:
+    # a live, correctly-identified publisher whose beacon has merely gone stale
+    # (a laptop suspending mid-sleep, a slow snapshot read) is still the
+    # legitimate lock holder, and stealing its lock would start a second daemon
+    # publishing concurrently - exactly the mutual exclusion this lock exists to
+    # provide. Only an impostor that cannot prove identity at all is condemned.
+    # A lock younger than FM_LOCK_STALE_AFTER is never condemned either, even
+    # when identity is unprovable: a publisher that just won the race has not
+    # yet had time to write its own record, and stealing that lock mid-startup
+    # would break the same mutual exclusion.
     holder_proven=0
-    if alive=$(daemon_alive) && [ "${alive%%$'\t'*}" = "$FM_LOCK_HELD_PID" ]; then
+    if holder_pid=$(daemon_identity) && [ "$holder_pid" = "$FM_LOCK_HELD_PID" ]; then
       holder_proven=1
     fi
     if [ "$holder_proven" -eq 1 ] \
@@ -609,14 +651,14 @@ cmd_run() {
   else
     [ -z "$record_tmp" ] || rm -f -- "$record_tmp" 2>/dev/null || true
   fi
-  beat
+  beat_or_log
 
   while :; do
-    beat
+    beat_or_log
     if ! publish_once; then
       log_failure "$FLEET_PUBLISH_ERROR"
     fi
-    beat
+    beat_or_log
     # Sleep the cadence in slices so the configuration is re-read every tick
     # instead of once per cadence: a changed cadence takes effect within one
     # tick, and a removed or unusable one stops the daemon within about two
@@ -629,7 +671,7 @@ cmd_run() {
       [ $(( cadence - slept )) -ge "$slice" ] || slice=$(( cadence - slept ))
       sleep "$slice"
       slept=$(( slept + slice ))
-      beat
+      beat_or_log
       read_cadence; rc=$?
       if [ "$rc" -eq 0 ]; then
         cadence=$FLEET_PUBLISH_CADENCE

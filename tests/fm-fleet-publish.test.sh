@@ -17,14 +17,18 @@ BOOT_HOME="$TMP_ROOT/boot-home"
 REUSE_HOME="$TMP_ROOT/reuse-home"
 IDENT_HOME="$TMP_ROOT/identity-home"
 LOCK_HOME="$TMP_ROOT/lock-home"
+STALE_HOME="$TMP_ROOT/stale-beacon-home"
+BEAT_HOME="$TMP_ROOT/beat-fail-home"
 DAEMON_PIDS=()
 
 cleanup() {
   local record pid home
-  for home in "$HOME_DIR" "$STUB_HOME" "$BOOT_HOME" "$REUSE_HOME" "$IDENT_HOME" "$LOCK_HOME"; do
+  chmod 755 "$BEAT_HOME/state" >/dev/null 2>&1 || true
+  for home in "$HOME_DIR" "$STUB_HOME" "$BOOT_HOME" "$REUSE_HOME" "$IDENT_HOME" "$LOCK_HOME" "$STALE_HOME" "$BEAT_HOME"; do
     record="$home/state/.fleet-publish-daemon"
     [ -f "$record" ] || continue
     pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$record" 2>/dev/null | head -1)
+    [ -n "$pid" ] && kill -CONT "$pid" >/dev/null 2>&1
     [ -n "$pid" ] && kill -KILL "$pid" >/dev/null 2>&1
   done
   for pid in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
@@ -396,6 +400,52 @@ wait "$DECOY_PID" >/dev/null 2>&1 || true
 DECOY_PID=
 pass "a daemon lock held by an unrelated live process does not suppress start's recovery"
 
+# The lock-steal guard above proves IDENTITY, not freshness: a live,
+# correctly-identified publisher whose beacon has merely gone stale - a laptop
+# suspending mid-sleep, a slow snapshot read - is still the legitimate lock
+# holder. Stealing its lock would start a second daemon publishing
+# concurrently, defeating the very mutual exclusion the lock exists to
+# provide. Freeze a real publisher with SIGSTOP so its identity (pid, kernel
+# start time, token) is untouched but no further beat ever lands, forcing its
+# beacon stale without killing it, and confirm a second start neither steals
+# its lock nor spawns a competing daemon.
+seed_home "$STALE_HOME"
+printf '30\n' > "$STALE_HOME/config/fleet-snapshot-cadence"
+STALE_ENV=(FM_FLEET_PUBLISH_GRACE=2 FM_FLEET_PUBLISH_TICK_SECS=1 "${FM_TEST_START_ENV[@]}")
+
+env "${STALE_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" start >/dev/null 2>&1 \
+  || fail "the publisher did not start on the stale-beacon home"
+stale_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
+  "$STALE_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
+[ -n "$stale_pid" ] || fail "the stale-beacon publisher recorded no pid"
+DAEMON_PIDS+=("$stale_pid")
+
+kill -STOP "$stale_pid" 2>/dev/null \
+  || fail "could not freeze the publisher in order to age its beacon"
+sleep 3
+
+out=$(env FM_FLEET_PUBLISH_GRACE=2 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" status)
+case "$out" in
+  *"daemon=stopped"*) ;;
+  *)
+    kill -CONT "$stale_pid" 2>/dev/null || true
+    fail "a frozen publisher's stale beacon must read as stopped for freshness purposes, got: $out"
+    ;;
+esac
+
+env "${STALE_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" start >/dev/null 2>&1 || true
+after_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
+  "$STALE_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
+kill -CONT "$stale_pid" 2>/dev/null || true
+[ "$after_pid" = "$stale_pid" ] \
+  || fail "a stale beacon must not cause the daemon lock to be stolen and a second publisher started"
+kill -0 "$stale_pid" 2>/dev/null \
+  || fail "the original publisher must still be alive after a second start attempt against its stale beacon"
+
+kill -KILL "$stale_pid" >/dev/null 2>&1 || true
+wait "$stale_pid" >/dev/null 2>&1 || true
+pass "a live publisher with a stale beacon keeps its daemon lock rather than being stolen"
+
 # The identity a publisher records must describe the publisher, and this checks
 # that against the kernel rather than against itself. state/<home>/.fleet-publish-daemon
 # is this script's own published state record (AGENTS.md section 2 lists it), so
@@ -496,6 +546,47 @@ kill -0 "$daemon_pid" 2>/dev/null \
 [ -s "$STUB_HOME/state/fleet-snapshot.json" ] \
   || fail "stopping the publisher must leave the last published snapshot in place"
 pass "removing the cadence stops the publisher and leaves the snapshot in place"
+
+# --- a beat that cannot write is a recorded failure, not a silent success ----
+#
+# beat() must report failure honestly rather than claim success when nothing
+# was written: that lie is the concrete trigger that let a genuinely alive
+# publisher look identical to a dead one downstream. Make the state directory
+# unwritable so beat() cannot create its temporary beacon file, and confirm the
+# daemon records the failure once - not once per tick - without terminating.
+
+seed_home "$BEAT_HOME"
+printf '3\n' > "$BEAT_HOME/config/fleet-snapshot-cadence"
+: > "$BEAT_HOME/state/.fleet-publish.log"
+BEAT_ENV=(FM_FLEET_PUBLISH_MIN_CADENCE=1 FM_FLEET_PUBLISH_TICK_SECS=1 "${FM_TEST_START_ENV[@]}")
+
+env "${BEAT_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BEAT_HOME" "$PUBLISH" start >/dev/null 2>&1 \
+  || fail "the publisher did not start on the beat-failure home"
+beat_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
+  "$BEAT_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
+[ -n "$beat_pid" ] || fail "the beat-failure publisher recorded no pid"
+DAEMON_PIDS+=("$beat_pid")
+
+chmod 555 "$BEAT_HOME/state"
+attempts=0
+while [ "$attempts" -lt 100 ]; do
+  grep -q "beacon could not be written" "$BEAT_HOME/state/.fleet-publish.log" 2>/dev/null && break
+  sleep 0.2
+  attempts=$(( attempts + 1 ))
+done
+chmod 755 "$BEAT_HOME/state"
+[ "$attempts" -lt 100 ] \
+  || fail "an unwritable state directory must be recorded as a beat failure rather than presenting as healthy"
+kill -0 "$beat_pid" 2>/dev/null \
+  || fail "a beat failure must not terminate the publisher"
+occurrences=$(grep -c "beacon could not be written" "$BEAT_HOME/state/.fleet-publish.log")
+[ "$occurrences" -eq 1 ] \
+  || fail "a sustained beat failure must be logged once, not once per tick, got $occurrences occurrences"
+
+env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$BEAT_HOME" "$PUBLISH" stop >/dev/null 2>&1 || true
+kill -KILL "$beat_pid" >/dev/null 2>&1 || true
+wait "$beat_pid" >/dev/null 2>&1 || true
+pass "an unwritable state directory is recorded as a beat failure rather than presenting as healthy"
 
 # --- 4. atomicity -----------------------------------------------------------
 #
