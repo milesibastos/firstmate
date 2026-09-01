@@ -1791,10 +1791,15 @@ pass "a state root reached through a symlink claims and records like a direct on
 
 # A `..` that crosses a symlink still resolves somewhere the lexical path does
 # not name, and must stay rejected: accepting symlinked ancestors is what the
-# fix allows, not path traversal.
-mkdir -p "$SYM_ROOT/real/nested/deep" "$SYM_ROOT/decoy"
-chmod 700 "$SYM_ROOT/real/nested/deep" "$SYM_ROOT/decoy"
+# fix allows, not path traversal. The kernel resolves vialink/../decoy to
+# real/decoy component-by-component, not to the lexical decoy at $SYM_ROOT, so
+# that physical target must exist as its own real directory or the rejection
+# would come from a plain missing-directory check instead of the guard.
+mkdir -p "$SYM_ROOT/real/nested/deep" "$SYM_ROOT/real/decoy" "$SYM_ROOT/decoy"
+chmod 700 "$SYM_ROOT/real/nested/deep" "$SYM_ROOT/real/decoy" "$SYM_ROOT/decoy"
 ln -s "$SYM_ROOT/real/nested" "$SYM_ROOT/vialink"
+[ -d "$SYM_ROOT/vialink/../decoy" ] \
+  || fail "the .. crossing a symlink does not resolve to a real directory"
 traversal_verdict=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c '
   . "$1/bin/fm-pr-lib.sh"
   . "$1/bin/fm-procevent-lib.sh"

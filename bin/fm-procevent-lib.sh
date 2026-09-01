@@ -606,7 +606,7 @@ fm_procevent_path_physical_expected() {
 # be proved to have landed on exactly the directory validation approved even
 # when the configured path reaches it through a symlinked ancestor.
 fm_procevent_physical_dir() {
-  CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P
+  ( CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P )
 }
 
 fm_procevent_directory_owned_by_current_user() {
