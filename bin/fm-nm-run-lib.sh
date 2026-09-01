@@ -4,10 +4,17 @@
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
 # (pre-teardown run abort, see its "Fix 1" header comment). Teardown uses only
-# strict branch-and-head identity; crew-state additionally permits the active
-# pipeline-owned exemption defined below. Getting this wrong in either
-# direction is unsafe: a false negative hides a genuinely parked run, and a
-# false positive lets teardown act on a run it does not own.
+# strict branch-and-head identity; crew-state additionally consults branch
+# OWNERSHIP (fm_nm_run_branch_ownership, below) and the active pipeline-owned
+# exemption. Getting this wrong in either direction is unsafe: a false
+# negative hides a genuinely parked run, and a false positive lets teardown
+# act on a run it does not own.
+#
+# Ownership is the strongest primitive here and the only one that does not
+# INFER: it reads the pipeline's own record of which run holds the branch.
+# Prefer it wherever a branch may carry more than one run; the head and
+# recency rules are the fallbacks for a CLI that does not publish it.
+# Verified against no-mistakes v1.60.2.
 #
 # Bounded call to `no-mistakes "$@"` in dir $1, timeout $2 seconds. The bounded
 # form preserves stdout, stderr, and exit status; the checked form discards
@@ -64,8 +71,9 @@ fm_nm_field() {  # <toon-output> <key>
 #     the same history advanced the run tip past local HEAD)
 #   - run head is a strict ancestor of worktree HEAD, or diverged: no match
 #     (local work advanced outside the run, or the branch tip was rewritten)
-# fm_nm_run_is_pipeline_owned_active below carries the one exemption: a live
-# run whose pipeline currently owns the branch binds without head equality.
+# fm_nm_run_branch_ownership and fm_nm_run_is_pipeline_owned_active below
+# carry the exemptions: a live run the pipeline currently owns binds without
+# head equality.
 fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   local wt=$1 run_head=$2 local_full run_full
   [ -n "$run_head" ] || return 1
@@ -73,17 +81,6 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   run_full=$(git -C "$wt" rev-parse --verify "${run_head}^{commit}" 2>/dev/null) || return 1
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
-}
-
-# 0 if head $2 resolves to a commit object in worktree $1 at all. This
-# distinguishes a PROVEN mismatch (resolvable but not current: a historical or
-# diverged head fm_nm_head_matches_worktree correctly rejects) from UNKNOWN
-# attribution (unresolvable: e.g. a pipeline-owned lane head that never
-# reached this worktree). A caller scanning run rows newest-first must stop on
-# unknown attribution rather than surface an older, superseded run.
-fm_nm_head_resolvable() {  # <worktree> <head>
-  [ -n "$2" ] || return 1
-  git -C "$1" rev-parse --verify --quiet "$2^{commit}" >/dev/null 2>&1
 }
 
 # branch_sync.state from captured `axi status` TOON $1: the scalar directly
@@ -121,4 +118,59 @@ fm_nm_run_is_active() {  # <toon-output>
 fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   [ "$(fm_nm_branch_sync_state "$1")" = pipeline_owned ] || return 1
   fm_nm_run_is_active "$1"
+}
+
+# --- branch ownership -------------------------------------------------------
+# The branch's run OF RECORD, read from the `branch_sync.pipeline.run` scalar
+# in captured `axi status` TOON.
+#
+# It names the run the pipeline last bound to this branch. It PERSISTS after
+# the branch is released - observed live as `branch_sync.state: user_owned`
+# still naming a cancelled run - so it is not by itself proof of a live
+# holder. Callers may waive the head rule on it only for an ACTIVE run
+# (fm_nm_run_is_active); for a terminal one it identifies which run the branch
+# belongs to, and the head rule still decides whether that run describes the
+# worktree's current code.
+#
+# This is the field that genuinely answers ownership. The alternatives all
+# infer it and all get it wrong on a branch with more than one run: recency
+# picks the newest row even when it is a terminal superseded one, and head
+# equality rejects exactly the live run whose lane head never reached the task
+# worktree. `branch_sync.pipeline.run` is the daemon's own binding, so it
+# needs no inference at all.
+#
+# `run:` is also the top-level block header (an empty scalar), so fm_nm_field
+# cannot be used here: the extractor is scoped by indentation to the
+# `pipeline:` sub-block of the top-level `branch_sync:` block. Empty when the
+# block is absent - a CLI without branch sync, or a branch with no pipeline
+# binding - which callers must treat as UNKNOWN ownership, never as unowned.
+fm_nm_branch_sync_pipeline_run() {  # <toon-output>
+  local s
+  s=$(printf '%s\n' "$1" | awk '
+    { line = $0; match(line, /^ */); ind = RLENGTH; key = substr(line, ind + 1) }
+    ind == 0 { inbs = (key ~ /^branch_sync:/); inpipe = 0; next }
+    inbs == 0 { next }
+    ind <= 2 { inpipe = (key ~ /^pipeline:/); next }
+    inpipe && key ~ /^run:/ { sub(/^run:[ \t]*/, "", key); print key; exit }
+  ')
+  fm_nm_strip_quotes "$s"
+}
+
+# Ownership verdict for the run described by captured `axi status` TOON $1,
+# echoed as exactly one of:
+#   owned   - branch_sync names THIS run as the branch's run of record. An
+#             ACTIVE one is attributable with no head check, because a live
+#             lane head is routinely not a git object in the task worktree. A
+#             TERMINAL one still needs the head rule - see above.
+#   foreign - branch_sync names a DIFFERENT run. This run has been superseded
+#             (or belongs to another crew) and must never be attributed; the
+#             run of record is the one to ask about instead.
+#   unknown - no ownership record available. Callers fall back to the head
+#             rules above; they must not read this as "not owned".
+fm_nm_run_branch_ownership() {  # <toon-output>
+  local owner id
+  owner=$(fm_nm_branch_sync_pipeline_run "$1")
+  id=$(fm_nm_strip_quotes "$(fm_nm_field "$1" id)")
+  if [ -z "$owner" ] || [ -z "$id" ]; then printf 'unknown'; return; fi
+  if [ "$owner" = "$id" ]; then printf 'owned'; else printf 'foreign'; fi
 }
