@@ -416,10 +416,11 @@ record_field() {  # <name>
 #                                                   beacon was written by a live
 #                                                   instance rather than left
 #                                                   behind by a dead one.
-# daemon_alive adds the freshness gate on top of this; cmd_run's lock-steal
-# guard calls this directly because a steal decision must not depend on how
+# daemon_state below adds the freshness gate on top of this to classify
+# progress as well as identity; cmd_run's lock-steal guard calls this directly
+# instead of daemon_state because a steal decision must not depend on how
 # recently the genuine publisher happened to beat. Every other caller goes
-# through daemon_alive, so freshness stays a single owner rather than a
+# through daemon_state, so freshness stays a single owner rather than a
 # divergent second copy of these four facts.
 daemon_identity() {
   local pid recorded_token recorded_start live_start beacon_token
@@ -447,10 +448,23 @@ daemon_identity() {
 #   2  running-not-beating - identity proven, beacon stale (e.g. the host
 #                            suspended past GRACE while the daemon slept).
 # status, start and stop all read this one function rather than each branching
-# on daemon_alive themselves, so the operator surface cannot drift out of step
-# with what the lock-steal guard in cmd_run already treats as proof of
-# identity. It is built on daemon_identity for identity and the same freshness
-# arithmetic daemon_alive used to compute, restating neither.
+# on identity and freshness themselves, so the operator surface cannot drift
+# out of step with what the lock-steal guard in cmd_run already treats as
+# proof of identity. It is built on daemon_identity for identity; freshness is
+# answered here and nowhere else, so it stays a single owner rather than a
+# divergent second copy of that arithmetic.
+#
+# Liveness must bind IDENTITY, not merely freshness. A pid plus a fresh beacon is
+# not proof: if the publisher dies just after a beat and the kernel hands its pid
+# to an unrelated process while that beacon is still inside the grace window, a
+# freshness-only check calls that unrelated process the publisher. Shortening
+# the grace window only makes that race rarer; it stays wrong, so the window is
+# not the fix. daemon_identity above proves identity first; only then does this
+# function answer freshness, which is progress rather than identity. A record
+# written before identity binding existed lacks the token and start time; it is
+# treated as unprovable and therefore stopped, so recovery runs. That direction
+# is deliberate: an extra start attempt is harmless because the singleton lock
+# admits one daemon, while a false "already running" loses publication silently.
 daemon_state() {
   local pid mtime now age
   pid=$(daemon_identity) || return 1
@@ -461,31 +475,6 @@ daemon_state() {
   age=$(( now - mtime ))
   printf '%s\t%s\n' "$pid" "$age"
   [ "$age" -le "$GRACE" ] || return 2
-  return 0
-}
-
-# daemon_alive: 0 when this home's publisher is genuinely running AND making
-# progress.
-#
-# Liveness must bind IDENTITY, not merely freshness. A pid plus a fresh beacon is
-# not proof: if the publisher dies just after a beat and the kernel hands its pid
-# to an unrelated process while that beacon is still inside the grace window, a
-# freshness-only check calls that unrelated process the publisher. Shortening
-# the grace window only makes that race rarer; it stays wrong, so the window is
-# not the fix. daemon_state above proves identity via daemon_identity and only
-# then answers freshness, which is progress rather than identity; daemon_alive
-# restates neither and simply narrows daemon_state to its "running" state, so
-# its own contract - and every caller that only cares whether publication is
-# actively progressing - is unchanged. A record written before identity binding
-# existed lacks the token and start time; it is treated as unprovable and
-# therefore not alive, so recovery runs. That direction is deliberate: an extra
-# start attempt is harmless because the singleton lock admits one daemon, while
-# a false "already running" loses publication silently.
-daemon_alive() {
-  local out rc
-  out=$(daemon_state); rc=$?
-  [ "$rc" -eq 0 ] || return 1
-  printf '%s\n' "$out"
   return 0
 }
 
@@ -565,7 +554,7 @@ FLEET_PUBLISH_TOKEN=
 # make a healthy publisher intermittently unrecoverable and intermittently
 # unstoppable. The rename also carries the mtime the freshness check reads.
 # Failure is reported honestly (non-zero) rather than swallowed: the beacon is
-# the one signal daemon_alive trusts to mean "making progress", so a heartbeat
+# the one signal daemon_state trusts to mean "making progress", so a heartbeat
 # that claims success when it did not write anything would let an unwritable or
 # full state directory present as a healthy publisher whose beacon merely ages.
 beat() {
@@ -628,7 +617,7 @@ cmd_run() {
     # radius (it also gates the watcher and every other home in the fleet) and
     # is filed on its own; do not delete this guard as redundant when that
     # lands, and do not assume it protects more than this one lock.
-    # This proves IDENTITY ONLY, deliberately not daemon_alive's freshness gate:
+    # This proves IDENTITY ONLY, deliberately not daemon_state's freshness gate:
     # a live, correctly-identified publisher whose beacon has merely gone stale
     # (a laptop suspending mid-sleep, a slow snapshot read) is still the
     # legitimate lock holder, and stealing its lock would start a second daemon

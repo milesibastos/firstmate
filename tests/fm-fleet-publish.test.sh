@@ -412,7 +412,7 @@ pass "a daemon lock held by an unrelated live process does not suppress start's 
 # start neither steals its lock nor spawns a competing daemon.
 seed_home "$STALE_HOME"
 printf '30\n' > "$STALE_HOME/config/fleet-snapshot-cadence"
-STALE_ENV=(FM_FLEET_PUBLISH_GRACE=2 FM_FLEET_PUBLISH_TICK_SECS=6 "${FM_TEST_START_ENV[@]}")
+STALE_ENV=(FM_FLEET_PUBLISH_GRACE=2 FM_FLEET_PUBLISH_TICK_SECS=8 "${FM_TEST_START_ENV[@]}")
 
 env "${STALE_ENV[@]}" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" start >/dev/null 2>&1 \
   || fail "the publisher did not start on the stale-beacon home"
@@ -421,9 +421,10 @@ stale_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
 [ -n "$stale_pid" ] || fail "the stale-beacon publisher recorded no pid"
 DAEMON_PIDS+=("$stale_pid")
 
-# Past GRACE=2s but well inside the 6s tick window, so the daemon is still
-# genuinely alive and simply has not beaten again yet.
-sleep 4
+# Past GRACE=2s with a 5s margin before the next beat at the 8s tick mark, so
+# status and start (each shelling out to ps more than once via daemon_identity)
+# cannot lose a race against the beacon refreshing back to fresh.
+sleep 3
 
 out=$(env FM_FLEET_PUBLISH_GRACE=2 FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STALE_HOME" "$PUBLISH" status)
 case "$out" in
