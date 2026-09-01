@@ -343,10 +343,12 @@ fm_procevent_claim_state_root_field_valid() {  # <canonical-state-root>
 }
 
 fm_procevent_claim_state_root_identity() {  # <state-root>
-  local state=$1 canonical device inode owner mode
+  local state=$1 canonical normalized expected device inode owner mode
   fm_procevent_private_directory_valid "$state" 0 || return 1
   canonical=$(cd -P -- "$state" && pwd -P) || return 1
-  [ "$canonical" = "$(fm_procevent_path_normalize "$state")" ] || return 1
+  normalized=$(fm_procevent_path_normalize "$state") || return 1
+  expected=$(fm_procevent_path_physical_expected "$normalized") || return 1
+  [ "$canonical" = "$expected" ] || return 1
   fm_procevent_claim_state_root_field_valid "$canonical" || return 1
   device=$(fm_pr_file_device "$canonical") || return 1
   inode=$(fm_pr_file_inode "$canonical") || return 1
@@ -576,6 +578,37 @@ fm_procevent_path_normalize() {
   printf '/%s\n' "$(IFS=/; printf '%s' "${normalized[*]}")"
 }
 
+# fm_procevent_path_physical_expected <normalized-absolute-path>
+# The physical location a lexically normalized path must resolve to while its
+# own leaf is not a symlink: every ancestor resolved, the leaf appended
+# verbatim. Comparing a physical path against the lexical normalization itself
+# would reject a state root reached through a symlinked ancestor, which is
+# legitimate rather than malformed - every macOS $TMPDIR sits under /var, a
+# symlink to /private/var, so no claim could be acquired under a temp-dir home
+# at all. A `..` that crosses a symlink still diverges from this expectation
+# and is still rejected, and on a tree with no symlink at all the expectation
+# is the normalization, so the comparison is unchanged on Linux.
+fm_procevent_path_physical_expected() {
+  local lexical=$1 parent leaf parent_real
+  case "$lexical" in /?*) ;; *) return 1 ;; esac
+  leaf=${lexical##*/}
+  [ -n "$leaf" ] || return 1
+  parent=${lexical%/*}
+  parent_real=$(CDPATH='' cd -P -- "${parent:-/}" 2>/dev/null && pwd -P) || return 1
+  case "$parent_real" in
+    /) printf '/%s\n' "$leaf" ;;
+    *) printf '%s/%s\n' "$parent_real" "$leaf" ;;
+  esac
+}
+
+# fm_procevent_physical_dir <directory>
+# The physical location of an already validated directory, so a later `cd` can
+# be proved to have landed on exactly the directory validation approved even
+# when the configured path reaches it through a symlinked ancestor.
+fm_procevent_physical_dir() {
+  CDPATH='' cd -P -- "$1" 2>/dev/null && pwd -P
+}
+
 fm_procevent_directory_owned_by_current_user() {
   local owner
   if [ "$(uname)" = Darwin ]; then
@@ -587,7 +620,7 @@ fm_procevent_directory_owned_by_current_user() {
 }
 
 fm_procevent_private_directory_valid() {
-  local directory=$1 exact_mode=$2 canonical normalized mode
+  local directory=$1 exact_mode=$2 canonical normalized expected mode
   [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
   fm_procevent_directory_owned_by_current_user "$directory" || return 1
   mode=$(fm_pr_file_mode "$directory") || return 1
@@ -599,7 +632,8 @@ fm_procevent_private_directory_valid() {
   fi
   canonical=$(cd -P -- "$directory" && pwd -P) || return 1
   normalized=$(fm_procevent_path_normalize "$directory") || return 1
-  [ "$canonical" = "$normalized" ]
+  expected=$(fm_procevent_path_physical_expected "$normalized") || return 1
+  [ "$canonical" = "$expected" ]
 }
 
 fm_procevent_capture_inbox_prepare() {
@@ -610,14 +644,15 @@ fm_procevent_capture_inbox_prepare() {
     (umask 077; mkdir "$inbox") || return 1
   fi
   fm_procevent_private_directory_valid "$inbox" 1 || return 1
-  printf '%s\n' "$inbox"
+  fm_procevent_physical_dir "$inbox"
 }
 
 fm_procevent_extension_staging_prepare() {
   local state=$1 registry
   fm_procevent_private_directory_valid "$state" 0 || return 1
   registry=$(fm_procevent_registry_dir "$state")
-  fm_procevent_private_directory_valid "$registry" 1
+  fm_procevent_private_directory_valid "$registry" 1 || return 1
+  fm_procevent_physical_dir "$registry"
 }
 
 fm_procevent_capture_reservation_prepare() {
@@ -628,7 +663,7 @@ fm_procevent_capture_reservation_prepare() {
     (umask 077; mkdir "$reservation") || return 1
   fi
   fm_procevent_private_directory_valid "$reservation" 1 || return 1
-  printf '%s\n' "$reservation"
+  fm_procevent_physical_dir "$reservation"
 }
 
 fm_procevent_capture_reservation_remove_claim() {  # <state> <claim-token>

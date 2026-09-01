@@ -675,15 +675,15 @@ cmd_start() {
     fm_procevent_source_lock_release "$CLAIM_ID" 2>/dev/null || true
   }
   trap release_start_claim EXIT
-  local runner inbox reservation_dir
+  local runner inbox reservation_dir reg_physical
   if [ "$extension_owner" -eq 1 ]; then
-    fm_procevent_extension_staging_prepare "$STATE" \
+    reg_physical=$(fm_procevent_extension_staging_prepare "$STATE") \
       || die "cannot safely prepare the external registry staging boundary"
     inbox=$(fm_procevent_capture_inbox_prepare "$STATE") \
       || die "cannot durably capture the extension result"
-    CDPATH='' cd -- "$REG" 2>/dev/null \
+    CDPATH='' cd -- "$reg_physical" 2>/dev/null \
       || die "cannot safely prepare the external registry staging boundary"
-    [ "$(pwd -P)" = "$REG" ] \
+    [ "$(pwd -P)" = "$reg_physical" ] \
       || die "cannot safely prepare the external registry staging boundary"
     exec 9<. || die "cannot retain the external registry staging boundary"
     CDPATH='' cd -- "$inbox" 2>/dev/null \
