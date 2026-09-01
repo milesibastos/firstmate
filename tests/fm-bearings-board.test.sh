@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-bearings-board.sh: fail-closed payload validation,
-# slot-injection round-trip through the built page, bind-before-arm, and
-# idempotent re-arm of the stable board source.
+# slot-injection round-trip through the built page, bind-before-arm, idempotent
+# re-arm of the stable board source, and claiming it under a symlinked state
+# root.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -404,6 +405,43 @@ test_charted_kind_is_optional_and_accepts_both_values() {
   pass "charted kind is optional and accepts queued and warning"
 }
 
+test_board_source_claims_under_a_symlinked_state_root() {
+  local sym home data board out sid rc
+  # Arming registers the board; claiming it is what starting the source does,
+  # and that claim binds the home by comparing its state root's physical
+  # location against a normalization of the configured path. A home reached
+  # through a symlinked ancestor is a legitimate spelling, not a malformed one,
+  # so it must still claim. Relax that comparison back to a purely lexical one
+  # and no claim can be acquired here at all, which takes the armed board's
+  # whole answer path down with it.
+  #
+  # The symlink is built by this test rather than inherited from the platform's
+  # temp directory: every macOS $TMPDIR already sits under /var, a symlink to
+  # /private/var, but /var is a real directory on Linux, so an inherited
+  # symlink would leave this case vacuous on CI.
+  sym="$TMP_ROOT/symlinked-state-root"
+  mkdir -p "$sym/real"
+  ln -s "$sym/real" "$sym/link"
+  home=$(make_home symlinked-state-root/link/board)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+
+  out=$(run_board "$home" build "$data") \
+    || fail "the board did not build under a symlinked state root: $out"
+  assert_contains "$out" "armed: " \
+    "the board was not armed under a symlinked state root: $out"
+
+  sid=$(run_lavish_source_id "$home" "$board")
+  set +e
+  out=$(run_procevent "$home" start "$sid" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "the armed board source did not claim under a symlinked state root: $out"
+  pass "the armed board source claims under a symlinked state root"
+}
+
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
@@ -412,3 +450,4 @@ test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
 test_build_refuses_a_template_without_exactly_one_slot
+test_board_source_claims_under_a_symlinked_state_root
