@@ -1,0 +1,98 @@
+Verification of bin/fm-fleet-publish.sh on branch fm/fm-snapshot-cadence-e2
+target commit 101578ebc5c659f096882a617c8c55e9f11dc64b, run 2026-09-01.
+
+=== Environment note: sandbox nohup gap, worked around ===
+
+`cmd_start` in bin/fm-fleet-publish.sh detaches via `nohup ... &`. In this
+sandboxed test-execution shell, bare `nohup` fails before exec'ing anything:
+
+  $ nohup echo test >/dev/null 2>&1 </dev/null
+  nohup: can't detach from console: Inappropriate ioctl for device
+  $ [ -t 0 ] && echo tty || echo not-a-tty
+  not-a-tty
+
+This is a seatbelt/no-controlling-terminal artifact of this Bash tool's
+sandbox, reproduces identically with zero product code involved, and would hit
+the repo's only other user of this exact idiom (bin/fm-startup-network.sh)
+the same way. Worked around for this run with a minimal PATH-shimmed `nohup`
+(`trap '' HUP; exec "$@"`) that preserves every other real behavior the tests
+check (own process group via `set -m`, stdio->/dev/null, outliving the caller)
+and only substitutes the console-detach step that this sandbox cannot perform.
+
+=== Full suite, target commit, with the nohup shim on PATH ===
+
+`PATH=/tmp/nohup-shim:$PATH ./tests/fm-fleet-publish.test.sh` (jq present, bash 5.3.15), exit 0:
+
+  ok - an unconfigured home reports itself disabled and publishes nothing
+  ok - a malformed or too-small cadence is refused rather than silently defaulted
+  ok - a cadence too large to compare safely is refused rather than accepted
+  ok - an enabled home publishes a schema-valid snapshot carrying its own age
+  ok - a detached publisher republishes the snapshot on its own cadence
+  ok - the publisher is detached from the shell and process group that started it
+  ok - starting an already-running publisher does not start a second one
+  ok - a crashed publisher is recovered by the next start rather than blocking it
+  ok - stop refuses a recorded pid that is not beating instead of signalling it
+  ok - a failed snapshot read leaves the previous published snapshot intact
+  ok - publication resumes on its own once the producer recovers
+  ok - removing the cadence stops the publisher and leaves the snapshot in place
+  ok - a publish is atomic: a reader sees the previous whole snapshot or the next one
+  ok - session start leaves a home that did not opt in alone
+  ok - session start reports an unusable cadence instead of publishing nothing quietly
+  ok - a read-only session start arms no publisher
+  ok - session start arms the publisher on an opted-in home
+
+All 16 behavioral assertions pass, including detachment/own-process-group,
+crash recovery, atomicity, failed-read-leaves-snapshot-intact, and session-start
+arming/opt-out.
+
+=== Regression check: does the new test actually catch the pre-fix bug? ===
+
+Checked out bin/fm-fleet-publish.sh from 4b0063b (parent commit, before the
+review-round fix in 101578e) in place, ran it against a 20-digit cadence:
+
+  $ printf '99999999999999999999\n' > config/fleet-snapshot-cadence
+  $ FM_HOME=<tmp home> ./bin/fm-fleet-publish.sh status
+  ./bin/fm-fleet-publish.sh: line 236: [: 99999999999999999999: integer expected
+  publisher: enabled cadence=99999999999999999999s daemon=stopped (run: bin/fm-fleet-publish.sh start)
+
+  $ FM_FLEET_PUBLISH_START_WAIT=3 FM_HOME=<tmp home> ./bin/fm-fleet-publish.sh start
+  ./bin/fm-fleet-publish.sh: line 236: [: 99999999999999999999: integer expected
+  publisher: started pid=38502 cadence=99999999999999999999s
+  start exit=0
+  PRE-FIX: publisher IS running with oversized/overflowed cadence
+
+Confirms the exact fail-open described in the review finding: the pre-fix
+floor check (`[ "$value" -lt "$MIN_CADENCE" ]`) errors on overflow and `if`
+reads that as false, so the absurd value is silently accepted as "enabled"
+and a publisher actually starts with it. Restored bin/fm-fleet-publish.sh to
+the target commit (101578e) afterward; `git status` confirmed a byte-identical,
+clean working tree. Post-fix, the same scenario is refused: `status` reports
+"misconfigured (...20 digits, more than the 10-digit maximum...)" and both
+`start` and `run` exit non-zero (see "ok - a cadence too large to compare
+safely is refused rather than accepted" above).
+
+=== Manual product-level proof: artifact age advances unattended ===
+
+Independently of the daemon-detach test, ran the tick loop directly
+(`fm-fleet-publish.sh run`, backgrounded with plain `&`) against the REAL
+`bin/fm-fleet-snapshot.sh` producer on a freshly seeded temp home, cadence=1s
+via the documented FM_FLEET_PUBLISH_MIN_CADENCE test seam:
+
+  publisher pid=62086
+  t+1x2s generated=2026-09-01T18:26:01Z
+  t+2x2s generated=2026-09-01T18:26:04Z
+  t+3x2s generated=2026-09-01T18:26:06Z
+  t+4x2s generated=2026-09-01T18:26:07Z
+  t+5x2s generated=2026-09-01T18:26:10Z
+  publisher still alive
+  status: snapshot: .../fleet-snapshot.json generated=2026-09-01T18:26:10Z published=0s ago
+
+Then removing the cadence file stopped the publisher within one tick and left
+the last published snapshot exactly in place:
+
+  before removal, generated=2026-09-01T18:26:27Z, publisher alive=yes
+  after cadence removed, publisher alive=no
+  snapshot after removal generated=2026-09-01T18:26:27Z (unchanged, last-good preserved)
+  log: [2026-09-01T18:26:29Z] cadence configuration was removed; the publisher stopped and left the last published snapshot in place
+
+Worktree left clean; no stray fleet-publish processes or temp files remain.
