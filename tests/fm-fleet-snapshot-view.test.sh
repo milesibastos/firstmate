@@ -799,6 +799,333 @@ test_parked_scout_decision_stays_pending() {
   pass "a scout still parked at a decision stays pending (terminal clear does not over-fire)"
 }
 
+# --- cancellation contract ---------------------------------------------------
+#
+# The snapshot is read-only, so a caller that stopped waiting has no use for the
+# work still under way, and every per-task read it started must stop with it.
+# This used to be false in both directions: bash never delivered the signal into
+# the command substitution running the task loop, and fm-timeout-lib.sh puts
+# each bounded child in its OWN process group, out of reach of a caller
+# signalling the pid it holds.
+#
+# The fixture makes each per-task read block in a fake `no-mistakes axi status`,
+# which is where the real per-task cost is spent (bin/fm-crew-state.sh). Each
+# invocation records that it STARTED, sleeps, then records that it COMPLETED, so
+# the assertions can talk about work rather than about pids: a completion marker
+# written after the abort is proof the work outlived the caller. That is immune
+# to pid reuse in a way an assertion over a recorded pid set is not.
+
+make_slow_fakebin() {  # <dir> <marker-dir> <sleep-seconds>
+  local fb marker=$2 secs=$3
+  fb=$(make_fakebin "$1")
+  cat > "$fb/no-mistakes" <<SH
+#!/usr/bin/env bash
+# Only the status read is slow; every other no-mistakes call stays instant.
+case "\${1:-} \${2:-}" in
+  "axi status") ;;
+  *) exit 0 ;;
+esac
+: > "$marker/started.\$\$"
+sleep $secs
+: > "$marker/completed.\$\$"
+exit 0
+SH
+  chmod +x "$fb/no-mistakes"
+  printf '%s\n' "$fb"
+}
+
+# A ship task whose worktree is a real branch, so fm-crew-state.sh actually
+# reaches the no-mistakes status read the fixture makes slow.
+write_slow_task() {  # <home> <id>
+  local home=$1 id=$2
+  fm_git_init_commit "$home/projects/$id" >/dev/null 2>&1
+  git -C "$home/projects/$id" checkout -q -b "fm/$id"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "worktree=$home/projects/$id" \
+    "project=alpha" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off"
+  printf 'working: under way\n' > "$home/state/$id.status"
+}
+
+count_markers() {  # <marker-dir> <prefix>
+  local n
+  n=$(find "$1" -maxdepth 1 -name "$2.*" 2>/dev/null | wc -l | tr -d ' ')
+  printf '%s\n' "${n:-0}"
+}
+
+test_cancelled_snapshot_stops_the_work_it_started() {
+  local home markers fakebin pid i started completed alive p before
+  local read_secs=2 observe=5
+  home=$(make_home cancel)
+  markers="$home/markers"
+  mkdir -p "$markers"
+  for i in 1 2 3 4; do write_slow_task "$home" "task$i"; done
+  # The read must be SHORT enough that an uncancelled one would finish inside
+  # the observation window below. A long sleep would make this test pass against
+  # the very bug it exists to catch, because nothing completes either way.
+  fakebin=$(make_slow_fakebin "$home" "$markers" "$read_secs")
+
+  # Launch the way a consumer does: a direct child whose pid we hold. Nothing
+  # here is ever selected by pattern, and no process group is ever signalled.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_CANCEL_GRACE=2 \
+    "$SNAPSHOT" --json >/dev/null 2>&1 &
+  pid=$!
+
+  # Wait until the per-task reads are genuinely in flight, so the abort lands on
+  # work in progress rather than before it starts.
+  for i in $(seq 60); do
+    [ "$(count_markers "$markers" started)" -gt 0 ] && break
+    sleep 0.1
+  done
+  started=$(count_markers "$markers" started)
+  [ "$started" -gt 0 ] || fail "fixture never started a per-task read; the test would be vacuous"
+  [ "$(count_markers "$markers" completed)" -eq 0 ] \
+    || fail "fixture read finished before the abort; the test would be vacuous"
+
+  # Record the tree while it is still reachable. Rooted at a pid we started, so
+  # every pid here is provably ours; used only to test liveness, never signalled.
+  alive=$(bash -c '. "$1/bin/fm-cancel-lib.sh"; fm_cancel_tree_pids "$2"' _ "$ROOT" "$pid")
+
+  # Baseline the completions as late as possible before the abort. The contract
+  # is "an abort stops the work it started", so only a completion recorded AFTER
+  # the abort violates it. Asserting an absolute zero claims more than the
+  # contract does: it also fails on a read that legitimately finished before the
+  # signal landed, which is what made this flaky under load rather than correct.
+  before=$(count_markers "$markers" completed)
+
+  # What a consumer's timeout does: signal the pid it holds. Not the group.
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the snapshot"
+
+  # Long enough that reads left running would have finished and said so.
+  sleep "$observe"
+
+  completed=$(count_markers "$markers" completed)
+  [ "$completed" -le "$before" ] \
+    || fail "aborted snapshot let $((completed - before)) per-task read(s) complete AFTER the abort"
+
+  kill -0 "$pid" 2>/dev/null && fail "snapshot process survived its own cancellation"
+  for p in $alive; do
+    if kill -0 "$p" 2>/dev/null; then
+      fail "a process the aborted snapshot started is still running past the grace period"
+    fi
+  done
+  pass "cancelling a snapshot stops the per-task reads it started"
+}
+
+# The pid-directed test above is not enough on its own: it is exactly the gap
+# that let per-task workers share the caller's process group reach the review
+# gate once already. fm-home-summary-refresh.sh's --_worker mode is bounded by
+# fm_run_timed, and every mechanism that library uses terminates the whole
+# process GROUP, not just the pid it holds. This test cancels the same way:
+# by signalling the snapshot's own process group, never a pid or group we did
+# not create ourselves.
+test_cancelled_snapshot_group_signal_stops_the_work_it_started() {
+  local home markers fakebin pid i started completed alive p before monitor_was_on=0
+  local read_secs=2 observe=5
+  home=$(make_home cancel-group)
+  markers="$home/markers"
+  mkdir -p "$markers"
+  for i in 1 2 3 4; do write_slow_task "$home" "task$i"; done
+  fakebin=$(make_slow_fakebin "$home" "$markers" "$read_secs")
+
+  # `set -m` so the job launched below becomes its own process-group leader;
+  # its pid and pgid are the same value, which is the only pgid this test ever
+  # derives or signals - never one looked up by pattern or found via ps|grep.
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_CANCEL_GRACE=2 \
+    "$SNAPSHOT" --json >/dev/null 2>&1 &
+  pid=$!
+  [ "$monitor_was_on" -eq 1 ] || set +m
+
+  for i in $(seq 60); do
+    [ "$(count_markers "$markers" started)" -gt 0 ] && break
+    sleep 0.1
+  done
+  started=$(count_markers "$markers" started)
+  [ "$started" -gt 0 ] || fail "fixture never started a per-task read; the test would be vacuous"
+  [ "$(count_markers "$markers" completed)" -eq 0 ] \
+    || fail "fixture read finished before the abort; the test would be vacuous"
+
+  # Record the tree while it is still reachable, rooted at the pid this test
+  # started and holds directly; used only to check liveness after the grace.
+  alive=$(bash -c '. "$1/bin/fm-cancel-lib.sh"; fm_cancel_tree_pids "$2"' _ "$ROOT" "$pid")
+
+  before=$(count_markers "$markers" completed)
+
+  # What fm_run_timed's own bound does on expiry: signal the process GROUP, not
+  # the pid. The group id is the pid this test holds, because `set -m` made the
+  # job its own group leader above.
+  kill -TERM -- "-$pid" 2>/dev/null || fail "could not signal the snapshot's process group"
+
+  sleep "$observe"
+
+  completed=$(count_markers "$markers" completed)
+  [ "$completed" -le "$before" ] \
+    || fail "group-signalled snapshot let $((completed - before)) per-task read(s) complete AFTER the abort"
+
+  kill -0 "$pid" 2>/dev/null && fail "snapshot process survived its own group cancellation"
+  for p in $alive; do
+    if kill -0 "$p" 2>/dev/null; then
+      fail "a process the group-cancelled snapshot started is still running past the grace period"
+    fi
+  done
+  pass "cancelling a snapshot by process group stops the per-task reads it started"
+}
+
+# The two cancellation tests above send the snapshot's own stdout AND stderr to
+# /dev/null, which hides a real defect: putting each worker into its own
+# process group (above) means the fan-out loop runs under `set -m`, and stock
+# macOS Bash 3.2.57 - what a caller actually gets on any PATH without Homebrew
+# bash ahead of /bin - reports a job's death straight to the shell's own
+# stderr under monitor mode, independent of any later `wait`. A real caller
+# (bin/fm-home-summary-refresh.sh) captures this command's stderr and reports
+# its last line as the producer error, so that noise would surface as a bogus
+# error on an otherwise successful read. These two tests capture stderr
+# instead of discarding it and run the real binary under /bin/bash explicitly,
+# because a dev machine with Homebrew bash ahead of /bin on PATH would resolve
+# the `#!/usr/bin/env bash` shebang to a bash version that does not reproduce
+# this at all and would make the test pass vacuously.
+test_snapshot_stderr_stays_clean_on_a_normal_multi_task_run() {
+  local home markers fakebin out err
+  [ -x /bin/bash ] || { pass "stderr-cleanliness check skipped without /bin/bash"; return; }
+  home=$(make_home stderr-clean-normal)
+  markers="$home/markers"
+  mkdir -p "$markers"
+  for i in 1 2 3 4; do write_slow_task "$home" "task$i"; done
+  fakebin=$(make_slow_fakebin "$home" "$markers" 1)
+  err="$home/stderr.log"
+
+  # A concurrency cap smaller than the task count forces multiple spawn/wait
+  # batches inside the monitor-mode window, not just one.
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_TASK_CONCURRENCY=2 \
+    /bin/bash "$SNAPSHOT" --json 2>"$err") \
+    || fail "a normal multi-task run under /bin/bash failed: $(cat "$err")"
+  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.tasks | length) == 4' >/dev/null \
+    || fail "a normal multi-task run under /bin/bash lost rows: $out"
+  [ "$(count_markers "$markers" completed)" -gt 0 ] \
+    || fail "fixture never completed a read; the test would be vacuous"
+  [ -s "$err" ] && fail "a successful run left job-control noise on stderr: $(cat "$err")"
+  pass "a normal multi-task run leaves no job-control noise on stderr under stock Bash"
+}
+
+test_snapshot_stderr_stays_clean_on_an_aborted_run() {
+  local home markers fakebin pid i started err
+  [ -x /bin/bash ] || { pass "stderr-cleanliness check skipped without /bin/bash"; return; }
+  home=$(make_home stderr-clean-aborted)
+  markers="$home/markers"
+  mkdir -p "$markers"
+  for i in 1 2 3 4; do write_slow_task "$home" "task$i"; done
+  fakebin=$(make_slow_fakebin "$home" "$markers" 2)
+  err="$home/stderr.log"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_CANCEL_GRACE=2 \
+    /bin/bash "$SNAPSHOT" --json >/dev/null 2>"$err" &
+  pid=$!
+
+  for i in $(seq 60); do
+    [ "$(count_markers "$markers" started)" -gt 0 ] && break
+    sleep 0.1
+  done
+  started=$(count_markers "$markers" started)
+  [ "$started" -gt 0 ] || fail "fixture never started a per-task read; the test would be vacuous"
+
+  # What a consumer's timeout does: signal the pid it holds.
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal the snapshot"
+  wait "$pid" 2>/dev/null
+
+  [ -s "$err" ] && fail "an aborted run left job-control noise on stderr: $(cat "$err")"
+  pass "an aborted run leaves no job-control noise on stderr under stock Bash"
+}
+
+# Scratch space is optional. The snapshot needed none before the fan-out existed
+# and still runs where there is none, which is not hypothetical: the perl-timeout
+# fixture in tests/fm-bearings-snapshot.test.sh runs it on a PATH built from an
+# explicit tool list that has no mktemp in it. Losing that would turn a faster
+# snapshot into one that cannot run at all in a constrained environment.
+test_snapshot_runs_without_scratch_space() {
+  local home fakebin out
+  home=$(make_home no-scratch)
+  write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/mktemp"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot failed when it could not create scratch space"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-fleet-snapshot.v1" and (.tasks | length) > 0
+  ' >/dev/null || fail "snapshot without scratch space lost its schema or its rows: $out"
+
+  # And it is the same answer, not a degraded one.
+  local full
+  full=$(FM_HOME="$home" PATH="$(dirname "$(command -v jq)"):$PATH" "$SNAPSHOT" --json)
+  [ "$(printf '%s' "$out" | jq -S 'del(.generated) | .tasks | map(.id)')" \
+    = "$(printf '%s' "$full" | jq -S 'del(.generated) | .tasks | map(.id)')" ] \
+    || fail "the no-scratch path returned different task rows than the fan-out"
+  pass "a snapshot with no scratch space still reads the fleet serially"
+}
+
+# The negative control. Without it the test above passes just as happily against
+# a fixture whose slow command never ran at all, which is the failure mode that
+# makes a cancellation test quietly worthless.
+test_uncancelled_snapshot_completes_its_reads() {
+  local home markers fakebin out
+  home=$(make_home cancel-control)
+  markers="$home/markers"
+  mkdir -p "$markers"
+  write_slow_task "$home" "task1"
+  fakebin=$(make_slow_fakebin "$home" "$markers" 1)
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "uncancelled snapshot failed"
+  printf '%s' "$out" | jq -e '.schema == "fm-fleet-snapshot.v1"' >/dev/null \
+    || fail "uncancelled snapshot did not produce its schema"
+  [ "$(count_markers "$markers" completed)" -gt 0 ] \
+    || fail "control never completed a read, so the cancellation test proves nothing"
+  pass "an uncancelled snapshot runs its per-task reads to completion"
+}
+
+# The identity rule fm-cancel-lib.sh exists to enforce. A root the caller did
+# not start is refused outright, because its descendants include the walk's own
+# helpers and, on a shared machine, other people's work.
+test_cancel_library_refuses_a_root_it_does_not_own() {
+  local rc=0
+  bash -c '. "$1/bin/fm-cancel-lib.sh"; fm_cancel_trees 1 "$$"' _ "$ROOT" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm_cancel_trees accepted \$\$ as a cancellation root"
+
+  rc=0
+  bash -c '. "$1/bin/fm-cancel-lib.sh"; fm_cancel_trees 1 not-a-pid' _ "$ROOT" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "fm_cancel_trees accepted a non-numeric root"
+  pass "the cancel library refuses a root the caller did not start"
+}
+
+# Deepest-first ordering is not cosmetic: signalling a parent first can reparent
+# a grandchild to init, where no descent walk can find it again.
+test_cancel_library_clears_a_tree_it_owns() {
+  bash -c '
+    . "$1/bin/fm-cancel-lib.sh"
+    ( sleep 45 & ( sleep 45 & wait ) & wait ) &
+    child=$!
+    sleep 0.5
+    before=$(fm_cancel_tree_pids "$child" | wc -l | tr -d " ")
+    [ "$before" -ge 3 ] || { echo "tree too small: $before" >&2; exit 1; }
+    deepest=$(fm_cancel_tree_pids "$child" | tail -1)
+    [ "$deepest" = "$child" ] || { echo "root must sort last, got $deepest" >&2; exit 1; }
+    fm_cancel_tree "$child" 3 || { echo "tree not cleared" >&2; exit 1; }
+    [ "$(fm_cancel_tree_pids "$child" | wc -l | tr -d " ")" -eq 0 ] \
+      || { echo "survivors remain" >&2; exit 1; }
+  ' _ "$ROOT" || fail "fm_cancel_tree did not clear a tree the caller started"
+  pass "the cancel library clears a process tree the caller started"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_main_inventory_orphan_and_unstructured_disclosure
@@ -814,3 +1141,11 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_cancelled_snapshot_stops_the_work_it_started
+test_cancelled_snapshot_group_signal_stops_the_work_it_started
+test_snapshot_stderr_stays_clean_on_a_normal_multi_task_run
+test_snapshot_stderr_stays_clean_on_an_aborted_run
+test_uncancelled_snapshot_completes_its_reads
+test_cancel_library_refuses_a_root_it_does_not_own
+test_cancel_library_clears_a_tree_it_owns
+test_snapshot_runs_without_scratch_space

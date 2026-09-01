@@ -1166,6 +1166,11 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-procevent-when.test.sh
       printf '%s\n' __script__:fm-remote-reply.test.sh
       ;;
+    bin/fm-cancel-lib.sh)
+      # Cancellation's only consumer today is the fleet snapshot, whose tests own
+      # the contract that an aborted read leaves nothing running.
+      printf '%s\n' snapshot-bearings
+      ;;
     bin/fm-timeout-lib.sh)
       # The shared hard bound: session start's runtime bound, the fleet/bearings
       # snapshots, the vendor auth probe, the stow cascade's per-home step, and
