@@ -15,11 +15,12 @@ HOME_DIR="$TMP_ROOT/publish-home"
 STUB_HOME="$TMP_ROOT/stub-home"
 BOOT_HOME="$TMP_ROOT/boot-home"
 REUSE_HOME="$TMP_ROOT/reuse-home"
+IDENT_HOME="$TMP_ROOT/identity-home"
 DAEMON_PIDS=()
 
 cleanup() {
   local record pid home
-  for home in "$HOME_DIR" "$STUB_HOME" "$BOOT_HOME" "$REUSE_HOME"; do
+  for home in "$HOME_DIR" "$STUB_HOME" "$BOOT_HOME" "$REUSE_HOME" "$IDENT_HOME"; do
     record="$home/state/.fleet-publish-daemon"
     [ -f "$record" ] || continue
     pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$record" 2>/dev/null | head -1)
@@ -313,6 +314,7 @@ DECOY_PID=
 DECOY_PID=$!
 DAEMON_PIDS+=("$DECOY_PID")
 REUSE_HOME="$TMP_ROOT/reuse-home"
+IDENT_HOME="$TMP_ROOT/identity-home"
 seed_home "$REUSE_HOME"
 printf '30\n' > "$REUSE_HOME/config/fleet-snapshot-cadence"
 # The dead publisher's own record and a beacon it wrote moments before dying.
@@ -349,6 +351,50 @@ kill -KILL "$DECOY_PID" >/dev/null 2>&1 || true
 wait "$DECOY_PID" >/dev/null 2>&1 || true
 DECOY_PID=
 pass "a recycled pid with a fresh beacon is not mistaken for the publisher"
+
+# The identity a publisher records must describe the publisher, and this checks
+# that against the kernel rather than against itself. state/<home>/.fleet-publish-daemon
+# is this script's own published state record (AGENTS.md section 2 lists it), so
+# reading it here asserts a state contract, not implementation text: the process
+# start time it publishes must be the start time of the pid it publishes.
+#
+# The regression this guards is worth naming, because it read as flakiness. The
+# daemon recorded its identity with BASHPID expanded inside a command
+# substitution, which yields that SUBSHELL's pid rather than the daemon's, so it
+# recorded the subshell's start time. The two agree whenever they land in the
+# same second and differ when they straddle one, and when they differed the
+# daemon could never prove it was itself for its whole life: status read it as
+# stopped, start could not confirm it, and stop refused to signal it.
+IDENT_HOME="$TMP_ROOT/identity-home"
+seed_home "$IDENT_HOME"
+printf '30\n' > "$IDENT_HOME/config/fleet-snapshot-cadence"
+ident_round=0
+while [ "$ident_round" -lt 3 ]; do
+  ident_round=$(( ident_round + 1 ))
+  run_publish "$IDENT_HOME" start >/dev/null 2>&1 \
+    || fail "the publisher did not start on round $ident_round of the identity check"
+  ident_pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' \
+    "$IDENT_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
+  [ -n "$ident_pid" ] || fail "the publisher recorded no pid on round $ident_round"
+  DAEMON_PIDS+=("$ident_pid")
+  ident_recorded=$(sed -n 's/^proc_start=//p' \
+    "$IDENT_HOME/state/.fleet-publish-daemon" 2>/dev/null | head -1)
+  ident_live=$(ps -p "$ident_pid" -o lstart= 2>/dev/null \
+    | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+  [ -n "$ident_recorded" ] \
+    || fail "the publisher published no process start time on round $ident_round"
+  [ "$ident_recorded" = "$ident_live" ] \
+    || fail "the publisher's recorded identity describes another process: recorded [$ident_recorded] but pid $ident_pid started [$ident_live]"
+  out=$(run_publish "$IDENT_HOME" status)
+  case "$out" in
+    *"daemon=running"*) ;;
+    *) fail "a publisher that is running must read as running, got: $out" ;;
+  esac
+  run_publish "$IDENT_HOME" stop >/dev/null 2>&1 \
+    || fail "a running publisher must be stoppable on round $ident_round"
+done
+pass "the identity a publisher records describes the publisher itself"
+
 
 
 # --- 3. a failed producer leaves the previous snapshot intact ---------------

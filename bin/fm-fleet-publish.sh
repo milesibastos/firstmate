@@ -526,7 +526,7 @@ beat() {
 }
 
 cmd_run() {
-  local cadence rc slept slice record_tmp config_failures=0
+  local cadence rc slept slice record_tmp config_failures=0 daemon_pid daemon_proc_start
   if ! mkdir -p "$STATE" 2>/dev/null; then
     printf 'fm-fleet-publish: state directory is unavailable: %s\n' "$STATE" >&2
     return 1
@@ -556,10 +556,20 @@ cmd_run() {
   # Published by rename for the same reason the beacon is: a reader that catches
   # a truncate-then-write half-finished sees a record with no token and concludes
   # the publisher is not provable, which would make a healthy daemon read as dead.
+  # BASHPID is snapshotted into an ordinary variable FIRST, and deliberately not
+  # written inline below. BASHPID re-evaluates in every subshell, so reading it
+  # inside a command substitution yields that SUBSHELL's pid, not the daemon's -
+  # which recorded the subshell's start time as the daemon's identity. The two
+  # agree whenever they fall in the same second and disagree when they straddle a
+  # boundary, so the daemon was intermittently unable to prove it was itself:
+  # status read it as stopped, start could not confirm it, and stop refused to
+  # signal it, for the whole life of that instance.
+  daemon_pid=${BASHPID:-$$}
+  daemon_proc_start=$(proc_start_of "$daemon_pid")
   record_tmp=$(umask 077; mktemp "$STATE/.fleet-publish-daemon.XXXXXX" 2>/dev/null) || record_tmp=
   if [ -n "$record_tmp" ] \
     && printf 'pid=%s\nproc_start=%s\ntoken=%s\nstarted=%s\ncadence=%s\n' \
-      "${BASHPID:-$$}" "$(proc_start_of "${BASHPID:-$$}")" "$FLEET_PUBLISH_TOKEN" \
+      "$daemon_pid" "$daemon_proc_start" "$FLEET_PUBLISH_TOKEN" \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" "$cadence" > "$record_tmp" 2>/dev/null
   then
     mv -f -- "$record_tmp" "$DAEMON_RECORD" 2>/dev/null || rm -f -- "$record_tmp" 2>/dev/null || true
