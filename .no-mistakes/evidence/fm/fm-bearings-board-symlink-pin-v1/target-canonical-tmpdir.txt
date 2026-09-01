@@ -1,0 +1,12 @@
+$ TMPDIR=/private/var/tmp/fm-evid-target.SmK5jH/ bash tests/fm-bearings-board.test.sh   # target commit 3c6afd0, canonical /private/var TMPDIR (simulates Linux CI)
+ok - path prints the stable home-scoped board location
+ok - build refuses malformed payloads before touching the board
+ok - charted kind is optional and accepts queued and warning
+ok - build injects the payload, binds any-origin, then arms the source
+not-autohandled: lavish-e524e30b4b0bfd24 (left for the handler; still unacknowledged)
+ok - registration can consume answers only after any-origin binding exists
+ok - build establishes the Lavish session before binding and arming
+ok - rebuild refreshes the board in place without double-arming
+ok - build refuses a template without exactly one data slot
+ok - the armed board source claims under a symlinked state root
+rc=0

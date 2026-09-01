@@ -1,0 +1,13 @@
+$ git archive a5f3cbe into scratch tree, copy in the new tests/fm-bearings-board.test.sh, run under canonical /private/var TMPDIR
+# pre-fix base a5f3cbe predates fm_procevent_path_physical_expected (merged in #3 / 23b6e76)
+ok - path prints the stable home-scoped board location
+ok - build refuses malformed payloads before touching the board
+ok - charted kind is optional and accepts queued and warning
+ok - build injects the payload, binds any-origin, then arms the source
+not-autohandled: lavish-ac0cc749f3c433a8 (left for the handler; still unacknowledged)
+ok - registration can consume answers only after any-origin binding exists
+ok - build establishes the Lavish session before binding and arming
+ok - rebuild refreshes the board in place without double-arming
+ok - build refuses a template without exactly one data slot
+not ok - the armed board source did not claim under a symlinked state root: error: cannot claim source: lavish-51842abc256070a7
+rc=1
