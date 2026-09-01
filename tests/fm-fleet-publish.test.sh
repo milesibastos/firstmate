@@ -245,6 +245,43 @@ pgid=$(ps -o pgid= -p "$daemon_pid" 2>/dev/null | tr -d '[:space:]')
   || fail "the publisher must run in its own process group, got pgid=$pgid"
 pass "the publisher is detached from the shell and process group that started it"
 
+# --- the launcher's own failure is surfaced, not swallowed ------------------
+#
+# Every other start in this file succeeds at actually launching a publisher, so
+# none of them exercise what happens when the launch itself never comes up.
+# This reproduces exactly that: a copy of this script with its execute bit
+# removed, so the exec inside launch_publisher fails the same way this
+# script's own removed nohup dependency used to fail in a console-less
+# sandbox - and start must name that failure rather than only report that it
+# could not confirm a publisher.
+FAKE_BIN="$TMP_ROOT/fakebin"
+FAKE_HOME="$TMP_ROOT/fakebin-home"
+mkdir -p "$FAKE_BIN"
+seed_home "$FAKE_HOME"
+printf '1\n' > "$FAKE_HOME/config/fleet-snapshot-cadence"
+cp "$ROOT/bin/fm-fleet-publish.sh" "$FAKE_BIN/fm-fleet-publish.sh"
+cp "$ROOT/bin/fm-wake-lib.sh" "$FAKE_BIN/fm-wake-lib.sh"
+cp "$ROOT/bin/fm-timeout-lib.sh" "$FAKE_BIN/fm-timeout-lib.sh"
+chmod 644 "$FAKE_BIN/fm-fleet-publish.sh"
+
+out=$(env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FAKE_HOME" \
+  FM_FLEET_PUBLISH_MIN_CADENCE=1 \
+  FM_FLEET_PUBLISH_START_ATTEMPTS=1 \
+  FM_FLEET_PUBLISH_START_WAIT=2 \
+  bash "$FAKE_BIN/fm-fleet-publish.sh" start 2>&1)
+rc=$?
+[ "$rc" -ne 0 ] \
+  || fail "start must fail when the launcher itself never comes up, got: $out"
+case "$out" in
+  *"could not confirm a running publisher"*) ;;
+  *) fail "start must still report that no publisher could be confirmed, got: $out" ;;
+esac
+case "$out" in
+  *"Permission denied"*) ;;
+  *) fail "start must name the launcher's actual error, not only that confirmation failed, got: $out" ;;
+esac
+pass "start surfaces the launcher's own failure instead of only failing to confirm"
+
 # A second start is idempotent rather than a second publisher.
 out=$(run_stub start) || fail "a second start must succeed"
 case "$out" in

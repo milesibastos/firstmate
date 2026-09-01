@@ -29,9 +29,10 @@
 #   - There is no launchd, cron, or systemd unit anywhere in bin/. Firstmate does
 #     not install host-level timers, and adding one for a snapshot would put a
 #     unit outside the operational home that no `fm-` command owns.
-# What DOES fit is the detach pattern bin/fm-startup-network.sh already proved
-# for work that must outlive the shell that launched it: nohup, its own process
-# group, stdio detached. This script reuses that shape and adds only the loop.
+# What DOES fit is the detach shape bin/fm-startup-network.sh already proved for
+# work that must outlive the shell that launched it: SIGHUP ignored in the child
+# before it execs, its own process group, stdio detached. This script reuses
+# that shape and adds only the loop.
 # Its write path is bin/fm-home-summary-refresh.sh's publication contract
 # (serialize, validate, rename), applied to the canonical snapshot.
 #
@@ -130,6 +131,7 @@ DAEMON_LOCK="$STATE/.fleet-publish-daemon.lock"
 DAEMON_RECORD="$STATE/.fleet-publish-daemon"
 BEACON="$STATE/.fleet-publish-beat"
 ERROR_LOG="$STATE/.fleet-publish.log"
+LAUNCH_ERR="$STATE/.fleet-publish-launch.err"
 
 PUBLISH_TIMEOUT=${FM_FLEET_PUBLISH_TIMEOUT:-120}
 MIN_CADENCE=${FM_FLEET_PUBLISH_MIN_CADENCE:-30}
@@ -669,6 +671,13 @@ cmd_run() {
   else
     [ -z "$record_tmp" ] || rm -f -- "$record_tmp" 2>/dev/null || true
   fi
+  # The daemon record is now in place, the earliest instant a detached start can
+  # confirm this instance, so a launch failure has nothing left to explain past
+  # this point. Closing stderr here (rather than leaving it aimed at start's
+  # bounded launch-error capture, LAUNCH_ERR) keeps that capture a snapshot of
+  # the launch moment instead of a file the daemon could otherwise grow without
+  # bound for the rest of its life via log_failure's stderr fallback.
+  exec 2>/dev/null
   beat_or_log
 
   while :; do
@@ -727,7 +736,7 @@ start_refuse_stale() {  # <pid> <age>
 }
 
 cmd_start() {
-  local cadence rc state_out state_rc pid age waited attempt child_pid=
+  local cadence rc state_out state_rc pid age waited attempt child_pid= launch_err
   read_cadence; rc=$?
   cadence=$FLEET_PUBLISH_CADENCE
   if [ "$rc" -ne 0 ]; then
@@ -752,11 +761,11 @@ cmd_start() {
   esac
 
   # Detached the same three ways bin/fm-startup-network.sh detaches its worker:
-  # stdio to /dev/null so no caller's pipe is held open, nohup so the publisher
-  # outlives the shell that launched it, and its own process group so a bounded
-  # caller's group teardown cannot take the publisher down with it. Together
-  # those are what let the artifact keep advancing after the agent that armed it
-  # is gone.
+  # stdio to /dev/null so no caller's pipe is held open, SIGHUP ignored in the
+  # child before it execs so the publisher outlives the shell that launched it,
+  # and its own process group so a bounded caller's group teardown cannot take
+  # the publisher down with it. Together those are what let the artifact keep
+  # advancing after the agent that armed it is gone.
   # Launching is retried rather than attempted once. A publisher that is still
   # dying holds the singleton lock for a moment, so a child launched into that
   # window loses the race and exits; giving up there would leave a home that
@@ -790,8 +799,18 @@ cmd_start() {
       waited=$(( waited + 1 ))
     done
   done
-  printf 'fm-fleet-publish: could not confirm a running publisher after %s attempt(s)\n' \
-    "$START_ATTEMPTS" >&2
+  # The launcher's own stderr (a failed exec, a missing interpreter, and the
+  # like) is captured in LAUNCH_ERR rather than discarded, so a start that never
+  # confirms a publisher can say why instead of only that it could not confirm
+  # one.
+  launch_err=$(cat "$LAUNCH_ERR" 2>/dev/null)
+  if [ -n "$launch_err" ]; then
+    printf 'fm-fleet-publish: could not confirm a running publisher after %s attempt(s): %s\n' \
+      "$START_ATTEMPTS" "$launch_err" >&2
+  else
+    printf 'fm-fleet-publish: could not confirm a running publisher after %s attempt(s)\n' \
+      "$START_ATTEMPTS" >&2
+  fi
   return 1
 }
 
@@ -800,21 +819,24 @@ launch_publisher() {  # sets child_pid
   monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  nohup env \
-    FM_ROOT_OVERRIDE="$FM_ROOT" \
-    FM_HOME="$FM_HOME" \
-    FM_STATE_OVERRIDE="$STATE" \
-    FM_DATA_OVERRIDE="$DATA" \
-    FM_CONFIG_OVERRIDE="$CONFIG" \
-    FM_PROJECTS_OVERRIDE="$PROJECTS" \
-    FM_FLEET_PUBLISH_SNAPSHOT_CMD="$SNAPSHOT_CMD" \
-    FM_FLEET_PUBLISH_TIMEOUT="$PUBLISH_TIMEOUT" \
-    FM_FLEET_PUBLISH_MIN_CADENCE="$MIN_CADENCE" \
-    FM_FLEET_PUBLISH_TICK_SECS="$TICK_SECS" \
-    FM_FLEET_PUBLISH_GRACE="$GRACE" \
-    FM_FLEET_PUBLISH_LOG_MAX_BYTES="$LOG_MAX_BYTES" \
-    "$SCRIPT_DIR/fm-fleet-publish.sh" run \
-    >/dev/null 2>&1 </dev/null &
+  : > "$LAUNCH_ERR" 2>/dev/null || true
+  (
+    trap '' HUP
+    exec env \
+      FM_ROOT_OVERRIDE="$FM_ROOT" \
+      FM_HOME="$FM_HOME" \
+      FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" \
+      FM_PROJECTS_OVERRIDE="$PROJECTS" \
+      FM_FLEET_PUBLISH_SNAPSHOT_CMD="$SNAPSHOT_CMD" \
+      FM_FLEET_PUBLISH_TIMEOUT="$PUBLISH_TIMEOUT" \
+      FM_FLEET_PUBLISH_MIN_CADENCE="$MIN_CADENCE" \
+      FM_FLEET_PUBLISH_TICK_SECS="$TICK_SECS" \
+      FM_FLEET_PUBLISH_GRACE="$GRACE" \
+      FM_FLEET_PUBLISH_LOG_MAX_BYTES="$LOG_MAX_BYTES" \
+      "$SCRIPT_DIR/fm-fleet-publish.sh" run
+  ) >/dev/null 2>"$LAUNCH_ERR" </dev/null &
   child_pid=$!
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
 }
