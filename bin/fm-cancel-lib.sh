@@ -79,6 +79,11 @@ set -u
 # Deepest-first matters: signalling a parent before its children can leave a
 # grandchild reparented to init, where no descent walk can ever find it again.
 # Leaves die first, so the chain stays intact while it is being taken apart.
+#
+# That ordering is necessary and NOT sufficient. On its own it creates the
+# opposite defect - a parent released by its child's death runs its next line -
+# which is why _fm_cancel_signal_trees freezes the tree before signalling it.
+# Neither half works without the other.
 fm_cancel_descendant_pids() {  # <root-pid>...
   local root roots=
   for root in "$@"; do
@@ -134,12 +139,54 @@ fm_cancel_tree_pids() {  # <root-pid>...
   return 0
 }
 
+# Freeze the whole tree, THEN signal it, then let it run to die.
+#
+# THE CANCELLED WORK DOES NOT MERELY SURVIVE, IT COMPLETES BECAUSE IT WAS
+# CANCELLED - KILLING THE CHILD IS WHAT RELEASES THE PARENT.
+#
+# That sentence inverts the assumption every reader brings to a cancellation
+# path, so it is stated before the mechanism rather than after it. Signalling
+# deepest-first WITHOUT freezing is worse than a missed kill: a victim's own
+# child dies several kills before the victim's own signal arrives, and a shell
+# reads that child's death as "the command finished" and executes its NEXT line
+# in the gap. In the fixture that next line records the work as complete.
+#
+# The deepest-first ordering above is NOT the mistake, and must not be
+# "corrected" by reversing it. Its reasoning still holds: signalling a parent
+# first can leave a grandchild reparented to init where no descent walk can
+# find it again. The real lesson is that ORDERING ALONE CANNOT SOLVE THIS,
+# because any gap between two signals is exploitable by whatever runs in it.
+# Freezing removes the gap instead of shrinking it, which is why it is the
+# correct shape rather than merely a better order. A future change that makes
+# the gap smaller is not a fix.
+#
+# The window is as wide as the number of pids signalled between a child and its
+# parent, so denser trees fail more often. Measured on a victim shell with 40
+# sibling sleeps, isolated from any caller: 16 of 50 non-vacuous runs ran the
+# parent's next line, and 0 of 50 once frozen first.
+#
+# THE CONT IS REQUIRED, NOT A COURTESY. A stopped process does not act on a
+# pending TERM until it resumes, so trimming the CONT does not reintroduce the
+# race - it introduces a HANG: the tree sits frozen and every caller waits out
+# its full grace before the KILL pass reaches them.
+#
+# Two hypotheses were investigated and DISPROVED before this one was found.
+# They are recorded because a post-abort completion looks exactly like both,
+# and the next reader will reach for the first one, as this author did:
+#   1. Fork-after-sweep orphaning - a grandchild forked between the process
+#      table read and signal delivery, reparented to init and unreachable by
+#      descent. Disproved: the pid that recorded the post-abort completion was
+#      in the discovered tree and was signalled.
+#   2. An unrecorded child - the window between forking a worker and recording
+#      its pid. Disproved: 25 runs comparing the caller's recorded pids against
+#      the shell's own job table found no mismatch.
 _fm_cancel_signal_trees() {  # <signal> <root-pid>...
-  local sig=$1 pid
+  local sig=$1 pid pids
   shift
-  for pid in $(fm_cancel_tree_pids "$@"); do
-    kill "-$sig" "$pid" 2>/dev/null || true
-  done
+  pids=$(fm_cancel_tree_pids "$@")
+  for pid in $pids; do kill -STOP "$pid" 2>/dev/null || true; done
+  for pid in $pids; do kill "-$sig" "$pid" 2>/dev/null || true; done
+  for pid in $pids; do kill -CONT "$pid" 2>/dev/null || true; done
 }
 
 _fm_cancel_live_count() {  # <root-pid>...

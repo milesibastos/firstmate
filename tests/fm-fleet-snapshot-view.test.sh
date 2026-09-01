@@ -858,7 +858,7 @@ count_markers() {  # <marker-dir> <prefix>
 }
 
 test_cancelled_snapshot_stops_the_work_it_started() {
-  local home markers fakebin pid i started completed alive p
+  local home markers fakebin pid i started completed alive p before
   local read_secs=2 observe=5
   home=$(make_home cancel)
   markers="$home/markers"
@@ -890,6 +890,13 @@ test_cancelled_snapshot_stops_the_work_it_started() {
   # every pid here is provably ours; used only to test liveness, never signalled.
   alive=$(bash -c '. "$1/bin/fm-cancel-lib.sh"; fm_cancel_tree_pids "$2"' _ "$ROOT" "$pid")
 
+  # Baseline the completions as late as possible before the abort. The contract
+  # is "an abort stops the work it started", so only a completion recorded AFTER
+  # the abort violates it. Asserting an absolute zero claims more than the
+  # contract does: it also fails on a read that legitimately finished before the
+  # signal landed, which is what made this flaky under load rather than correct.
+  before=$(count_markers "$markers" completed)
+
   # What a consumer's timeout does: signal the pid it holds. Not the group.
   kill -TERM "$pid" 2>/dev/null || fail "could not signal the snapshot"
 
@@ -897,8 +904,8 @@ test_cancelled_snapshot_stops_the_work_it_started() {
   sleep "$observe"
 
   completed=$(count_markers "$markers" completed)
-  [ "$completed" -eq 0 ] \
-    || fail "aborted snapshot let $completed per-task read(s) run to completion"
+  [ "$completed" -le "$before" ] \
+    || fail "aborted snapshot let $((completed - before)) per-task read(s) complete AFTER the abort"
 
   kill -0 "$pid" 2>/dev/null && fail "snapshot process survived its own cancellation"
   for p in $alive; do
