@@ -920,6 +920,7 @@ fm_lock_try_acquire() {
   if ! fm_lock_try_acquire "$steal"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    fm_lock_holder_is_current "$lockdir" "$FM_LOCK_HELD_PID" || true
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
@@ -941,6 +942,7 @@ fm_lock_try_acquire() {
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    fm_lock_holder_is_current "$lockdir" "$FM_LOCK_HELD_PID" || true
     return 1
   fi
 
@@ -974,6 +976,7 @@ fm_lock_try_acquire() {
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    fm_lock_holder_is_current "$lockdir" "$FM_LOCK_HELD_PID" || true
   fi
   fm_lock_release "$steal"
   return "$rc"

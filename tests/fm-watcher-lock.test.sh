@@ -269,7 +269,7 @@ test_lock_stale_steal_single_winner_under_concurrency() {
 }
 
 test_lock_live_steal_mutex_is_not_reclaimed() {
-  local dir state lockdir dead holder_file holder out i lockpid stealpid
+  local dir state lockdir dead holder_file holder out i lockpid stealpid proof
   dir=$(make_case lock-live-stealer)
   state="$dir/state"
   lockdir="$state/.contend.lock"
@@ -294,7 +294,7 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
-    printf "rc=%s held=%s lockpid=%s stealpid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "$(cat "$2/pid" 2>/dev/null || true)" "$(cat "$2.steal/pid" 2>/dev/null || true)"
+    printf "rc=%s held=%s proof=%s lockpid=%s stealpid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_HOLDER_PROOF:-}" "$(cat "$2/pid" 2>/dev/null || true)" "$(cat "$2.steal/pid" 2>/dev/null || true)"
   ' _ "$LIB" "$lockdir")
   wait "$holder" || fail "live steal mutex holder failed"
   case "$out" in
@@ -303,8 +303,10 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   esac
   lockpid=${out#*lockpid=}; lockpid=${lockpid%% *}
   stealpid=${out#*stealpid=}; stealpid=${stealpid%% *}
+  proof=${out#*proof=}; proof=${proof%% *}
   [ "$lockpid" = "$dead" ] || fail "primary lock changed while live steal mutex was held: $out"
   [ "$stealpid" = "$(cat "$holder_file")" ] || fail "live steal mutex owner changed: $out"
+  [ "$proof" = "dead" ] || fail "holder proof described the steal mutex's holder instead of the primary lock's dead pid: $out"
   pass "live steal mutex is not reclaimed"
 }
 
