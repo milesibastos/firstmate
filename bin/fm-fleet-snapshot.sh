@@ -6,6 +6,22 @@
 # The command is read-only: it does not acquire the session lock, drain wakes,
 # arm watchers, mutate backlog state, or write reports.
 #
+# Cancellation: the per-task reads stop when the caller does. On TERM, INT, or
+# HUP the fan-out in flight is stopped within FM_SNAPSHOT_CANCEL_GRACE seconds
+# and the command exits 143, 130, or 129. That is the half worth having, because
+# consumers time this command out and those reads are bounded inside their own
+# process groups, beyond the reach of a signal sent to this pid.
+#
+# Two gaps are deliberate, and the claim above is scoped to exclude them. The
+# registered-secondmate aggregation still runs inside a command substitution,
+# where bash defers trap handling entirely, so a signal arriving during that
+# phase is not acted on until the bounded cross-home reads it already started
+# have finished - FM_SNAPSHOT_SECONDMATE_TIMEOUT per home, not the cancellation
+# grace. Closing that means restructuring a second phase, and it is neither
+# where the cost was measured nor where the orphans were observed. SIGKILL is
+# the other: it cannot be trapped, so a consumer that needs cancellation must
+# send a catchable signal.
+#
 # Top-level fields:
 #   schema: stable schema id.
 #   generated: UTC observation time for this fresh command execution.
@@ -118,6 +134,12 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+# Per-task reads are independent, so they fan out instead of queueing behind
+# each other. The cap is what keeps a large fleet from opening one no-mistakes
+# client per task at once; FM_SNAPSHOT_CANCEL_GRACE is how long a cancelled
+# snapshot waits for that fan-out to stop before it stops it hard.
+FM_SNAPSHOT_TASK_CONCURRENCY=${FM_SNAPSHOT_TASK_CONCURRENCY:-8}
+FM_SNAPSHOT_CANCEL_GRACE=${FM_SNAPSHOT_CANCEL_GRACE:-2}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -149,6 +171,8 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_TASK_CONCURRENCY "$FM_SNAPSHOT_TASK_CONCURRENCY"
+validate_positive_bound FM_SNAPSHOT_CANCEL_GRACE "$FM_SNAPSHOT_CANCEL_GRACE"
 
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
@@ -162,6 +186,75 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIME
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed: the shared hard bound
+# shellcheck source=bin/fm-cancel-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-cancel-lib.sh"  # fm_cancel_trees: stop work a caller gave up on
+
+# --- cancellation ------------------------------------------------------------
+#
+# This command is read-only, so nothing it starts is worth finishing once the
+# caller has stopped waiting: a consumer that timed out has already decided this
+# snapshot is not the one it will render. Before this, its per-task reads kept
+# running anyway - each one bounded inside its own process group by
+# fm-timeout-lib.sh, and therefore out of reach of any signal the caller sent -
+# so a consumer that gave up still paid the full cost and could pile up reads it
+# no longer had a handle on.
+#
+# Two bash facts shape how the fan-out below is written, and both are easy to
+# get wrong:
+#
+#   1. A trap does not run while bash waits on a foreground command, which
+#      includes a command substitution and a pipeline. Wrapping the slow section
+#      in `$(...)` would defer the handler until that section finished, making
+#      cancellation strictly worse than not trapping at all.
+#   2. A trap DOES interrupt the `wait` builtin.
+#
+# So the slow section runs as background jobs in this shell and is collected
+# with `wait`, never inside `$(...)`. SNAPSHOT_CHILD_PIDS holds a `$!` for each,
+# which is the only ownership proof fm-cancel-lib.sh accepts.
+SNAPSHOT_WORKDIR=
+SNAPSHOT_CHILD_PIDS=()
+
+snapshot_child_pids() {
+  printf '%s\n' ${SNAPSHOT_CHILD_PIDS[@]+"${SNAPSHOT_CHILD_PIDS[@]}"}
+}
+
+# Scratch space is what makes the fan-out and its cancellation possible, and it
+# is deliberately optional. The snapshot needed no temp storage before and still
+# runs where there is none - a PATH without mktemp, or an unwritable TMPDIR - so
+# a failure here selects the original serial read rather than failing the
+# command. tests/fm-bearings-snapshot.test.sh exercises exactly that PATH.
+snapshot_ensure_workdir() {
+  [ -z "$SNAPSHOT_WORKDIR" ] || return 0
+  command -v mktemp >/dev/null 2>&1 || return 1
+  SNAPSHOT_WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX" 2>/dev/null) || return 1
+  [ -d "$SNAPSHOT_WORKDIR" ] || { SNAPSHOT_WORKDIR=; return 1; }
+}
+
+snapshot_cleanup() {
+  [ -n "$SNAPSHOT_WORKDIR" ] || return 0
+  rm -rf "$SNAPSHOT_WORKDIR" 2>/dev/null || true
+  SNAPSHOT_WORKDIR=
+}
+
+# Stop the fan-out, then leave by the signal's own conventional status so a
+# caller can tell cancellation from a read that genuinely failed.
+snapshot_cancel() {  # <exit-status>
+  local status=$1 pids
+  trap - TERM INT HUP EXIT
+  pids=$(snapshot_child_pids)
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086  # Deliberate word splitting: a list of pids.
+    fm_cancel_trees "$FM_SNAPSHOT_CANCEL_GRACE" $pids || true
+  fi
+  snapshot_cleanup
+  exit "$status"
+}
+
+trap 'snapshot_cancel 143' TERM
+trap 'snapshot_cancel 130' INT
+trap 'snapshot_cancel 129' HUP
+trap snapshot_cleanup EXIT
 
 usage() {
   cat <<'EOF'
@@ -443,210 +536,279 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   ' < "$backlog"
 }
 
-task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
+# One task row. Emits a single JSON object for <meta> on stdout.
+#
+# Split out of task_json_lines so the per-task reads can run as independent
+# jobs. It must stay free of shared mutable state: several copies of it run at
+# once, each writing into its own file.
+task_json_one() {  # <meta>
+  local meta=$1
+  local id kind harness mode yolo project worktree home projects spawn_gen backend target status_log report_path
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
+  [ -e "$meta" ] || return 0
+  id=$(basename "$meta" .meta)
+  id=$(basename "$meta" .meta)
+  kind=$(meta_value "$meta" kind)
+  [ -n "$kind" ] || kind=ship
+  harness=$(meta_value "$meta" harness)
+  mode=$(meta_value "$meta" mode)
+  yolo=$(meta_value "$meta" yolo)
+  project=$(meta_value "$meta" project)
+  worktree=$(meta_value "$meta" worktree)
+  home=$(meta_value "$meta" home)
+  projects=$(meta_value "$meta" projects)
+  spawn_gen=$(meta_value "$meta" spawn_gen)
+  remote_host=$(meta_value "$meta" remote_host)
+  remote_root=$(meta_value "$meta" remote_root)
+  remote_home_present=null
+  if [ -n "$remote_host" ]; then
+    backend=$(meta_value "$meta" remote_backend)
+    [ -n "$backend" ] || backend=unknown
+    target=$(meta_value "$meta" remote_target)
+  else
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+  fi
+  status_log="$STATE/$id.status"
+  report_path="$DATA/$id/report.md"
+  pr=$(meta_value "$meta" pr)
+  pr_source=meta
+  if [ -z "$pr" ]; then
+    pr_from_status=$(first_pr_url_in_file "$status_log" || true)
+    pr=$pr_from_status
+    pr_source=status_event
+  fi
+  if [ -z "$pr" ]; then
+    pr_source=absent
+  fi
+
+  current_json=$(crew_state_json "$id")
+  event_json=$(status_event_json "$status_log")
+  last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
+  current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
+  current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+
+  # Durable keyed open-decision set: fold the WHOLE status stream
+  # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
+  # never mask a still-open captain decision. The set is derived purely from the
+  # keyed fold - never from report bodies or decision-like prose - and then
+  # reconciled against the crew LIFECYCLE, which only clears a stale decision the
+  # crew has provably moved past. Two lifecycle signals clear it, neither of which
+  # reads any report content:
+  #   - a live activity read (run-step or busy pane) that is working/done, so a
+  #     crew that resumed past a gate is not still reported as parked; and
+  #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
+  #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
+  #     report POINTER, never as a reopened pending decision.
+  # Secondmates are excluded from lifecycle clearing: they are persistent and
+  # multiplex many concerns onto one stream, so activity on one concern must
+  # never clear another concern's keyed decision. A parked/blocked state, or a
+  # non-authoritative status-log/none read on a still-live task, keeps the fold's
+  # open decision surfacing.
+  open_decisions_tsv=$(status_open_decisions "$status_log")
+  if [ "$kind" != secondmate ] && \
+     { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
+         && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
+       || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
+    open_decisions_tsv=""
+  fi
+  open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
+    [ splits("\n") | select(length > 0)
+      | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
+      | select(. != null) ]')
+  pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
+  blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
+
+  endpoint_exists=null
+  agent_alive=not_checked
+  if [ -n "$remote_host" ]; then
+    if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
+      "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
+      remote_rc=0
+    else
+      remote_rc=$?
+    fi
+    if [ "$remote_rc" -eq 0 ]; then
+      remote_home_present=true
+      remote_state=$(printf '%s\n' "$remote_state" | tail -1)
+      case "$remote_state" in
+        alive) endpoint_exists=true; agent_alive=alive ;;
+        dead) endpoint_exists=true; agent_alive=dead ;;
+        missing) endpoint_exists=false; agent_alive=dead ;;
+        *) endpoint_exists=null; agent_alive=unknown ;;
+      esac
+    else
+      endpoint_exists=null
+      agent_alive=unknown
+    fi
+  else
+    if [ -n "$target" ]; then
+      if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
+        endpoint_exists=true
+      else
+        endpoint_exists=false
+      fi
+    fi
+    if [ "$kind" = secondmate ] && [ -n "$target" ]; then
+      agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
+    fi
+  fi
+
+  [ -f "$report_path" ] && report_present=1 || report_present=0
+  meta_json=$(path_present_json "$meta")
+  status_json=$event_json
+  report_json=$(path_present_json "$report_path")
+  if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
+  if [ -n "$home" ] && [ -n "$remote_host" ]; then
+    home_json=$(jq -n --arg path "$home" --argjson present "$remote_home_present" '{path:$path,present:$present}')
+  elif [ -n "$home" ]; then
+    home_json=$(path_present_json "$home")
+  else
+    home_json=$(jq -n '{path:null,present:false}')
+  fi
+
+  jq -n \
+    --arg id "$id" \
+    --arg kind "$kind" \
+    --arg harness "$harness" \
+    --arg mode "$mode" \
+    --arg yolo "$yolo" \
+    --arg project "$project" \
+    --arg worktree "$worktree" \
+    --arg home "$home" \
+    --arg projects "$projects" \
+    --arg spawn_gen "$spawn_gen" \
+    --arg backend "$backend" \
+    --arg target "$target" \
+    --arg remote_host "$remote_host" \
+    --arg remote_root "$remote_root" \
+    --arg pr "$pr" \
+    --arg pr_source "$pr_source" \
+    --arg agent_alive "$agent_alive" \
+    --arg observed_at "$SNAPSHOT_NOW" \
+    --arg last_event_raw "$last_event_raw" \
+    --argjson current_state "$current_json" \
+    --argjson meta_path "$meta_json" \
+    --argjson status_log "$status_json" \
+    --argjson report "$report_json" \
+    --argjson worktree_path "$worktree_json" \
+    --argjson home_path "$home_json" \
+    --argjson endpoint_exists "$endpoint_exists" \
+    --argjson open_decisions "$open_decisions_json" \
+    --argjson pending_decision "$(bool_json "$pending_decision")" \
+    --argjson blocked_event "$(bool_json "$blocked_event")" \
+    --argjson report_present "$(bool_json "$report_present")" \
+    '{
+      id:$id,
+      kind:$kind,
+      harness:($harness // ""),
+      mode:($mode // ""),
+      yolo:($yolo // ""),
+      project:($project // ""),
+      spawn_gen:($spawn_gen | if . == "" then null else . end),
+      backend:$backend,
+      remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
+      paths:{
+        meta:$meta_path,
+        status_log:$status_log,
+        worktree:$worktree_path,
+        home:$home_path,
+        report:$report
+      },
+      secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
+      current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+      endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
+        status:(if $endpoint_exists == false then "absent"
+                elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
+                else "unknown" end),
+        observed_at:$observed_at,freshness:"fresh"},
+      pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+      hints:{
+        pending_decision:$pending_decision,
+        blocked_event:$blocked_event,
+        open_decisions:$open_decisions,
+        scout_report_present:$report_present,
+        last_event_text:$last_event_raw
+      },
+      actions:(
+        if $kind == "secondmate" then
+          {send:"bin/fm-send.sh fm-\($id) \u0027<request>\u0027",
+           watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",
+           return_channel_note:"Secondmate answers come back through status/doc paths after a marked fm-send request."}
+        else
+          {watch:"bin/fm-peek.sh fm-\($id)",
+           steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
+           return_channel_note:null}
+        end)
+    }'
+}
+
+# Fan the per-task reads out instead of running them one after another.
+#
+# The cost this removes is not computation: almost all of a per-task read is
+# spent BLOCKED on `no-mistakes axi status`, one round trip to the shared daemon
+# for every ship task (bin/fm-crew-state.sh). Measured on an 8-task home, that
+# was 7.33s of the snapshot's ~11s, and the same eight reads issued together
+# take 1.04s - the daemon answers them concurrently and does not serialize.
+#
+# Completion order does not matter: each job writes its own file and the
+# assembly below sorts by id, exactly as the serial `done | jq -s sort_by(.id)`
+# did. The output is byte-for-byte what it was.
+# The original one-after-another read. Still the path taken when there is no
+# scratch space to collect parallel output into.
+task_json_lines_serial() {
+  local meta
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    kind=$(meta_value "$meta" kind)
-    [ -n "$kind" ] || kind=ship
-    harness=$(meta_value "$meta" harness)
-    mode=$(meta_value "$meta" mode)
-    yolo=$(meta_value "$meta" yolo)
-    project=$(meta_value "$meta" project)
-    worktree=$(meta_value "$meta" worktree)
-    home=$(meta_value "$meta" home)
-    projects=$(meta_value "$meta" projects)
-    spawn_gen=$(meta_value "$meta" spawn_gen)
-    remote_host=$(meta_value "$meta" remote_host)
-    remote_root=$(meta_value "$meta" remote_root)
-    remote_home_present=null
-    if [ -n "$remote_host" ]; then
-      backend=$(meta_value "$meta" remote_backend)
-      [ -n "$backend" ] || backend=unknown
-      target=$(meta_value "$meta" remote_target)
-    else
-      backend=$(fm_backend_of_meta "$meta")
-      target=$(fm_backend_target_of_meta "$meta")
-    fi
-    status_log="$STATE/$id.status"
-    report_path="$DATA/$id/report.md"
-    pr=$(meta_value "$meta" pr)
-    pr_source=meta
-    if [ -z "$pr" ]; then
-      pr_from_status=$(first_pr_url_in_file "$status_log" || true)
-      pr=$pr_from_status
-      pr_source=status_event
-    fi
-    if [ -z "$pr" ]; then
-      pr_source=absent
-    fi
-
-    current_json=$(crew_state_json "$id")
-    event_json=$(status_event_json "$status_log")
-    last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
-    current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
-    current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
-
-    # Durable keyed open-decision set: fold the WHOLE status stream
-    # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
-    # never mask a still-open captain decision. The set is derived purely from the
-    # keyed fold - never from report bodies or decision-like prose - and then
-    # reconciled against the crew LIFECYCLE, which only clears a stale decision the
-    # crew has provably moved past. Two lifecycle signals clear it, neither of which
-    # reads any report content:
-    #   - a live activity read (run-step or busy pane) that is working/done, so a
-    #     crew that resumed past a gate is not still reported as parked; and
-    #   - a TERMINAL done/failed state on a single-owner task (scout or ship), whose
-    #     deliverable is its report or PR, so a COMPLETED scout surfaces only as a
-    #     report POINTER, never as a reopened pending decision.
-    # Secondmates are excluded from lifecycle clearing: they are persistent and
-    # multiplex many concerns onto one stream, so activity on one concern must
-    # never clear another concern's keyed decision. A parked/blocked state, or a
-    # non-authoritative status-log/none read on a still-live task, keeps the fold's
-    # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log")
-    if [ "$kind" != secondmate ] && \
-       { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
-           && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
-         || { [ "$current_state" = "done" ] || [ "$current_state" = "failed" ]; }; }; then
-      open_decisions_tsv=""
-    fi
-    open_decisions_json=$(printf '%s' "$open_decisions_tsv" | jq -R -s '
-      [ splits("\n") | select(length > 0)
-        | (capture("^(?<key>[^\t]*)\t(?<verb>[^\t]*)\t(?<summary>.*)$")?)
-        | select(. != null) ]')
-    pending_decision=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "needs-decision") then 1 else 0 end')
-    blocked_event=$(printf '%s' "$open_decisions_json" | jq 'if any(.[]; .verb == "blocked") then 1 else 0 end')
-
-    endpoint_exists=null
-    agent_alive=not_checked
-    if [ -n "$remote_host" ]; then
-      if remote_state=$(fm_run_timed "$FM_SNAPSHOT_SECONDMATE_TIMEOUT" \
-        "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh state "$id" < /dev/null 2>/dev/null); then
-        remote_rc=0
-      else
-        remote_rc=$?
-      fi
-      if [ "$remote_rc" -eq 0 ]; then
-        remote_home_present=true
-        remote_state=$(printf '%s\n' "$remote_state" | tail -1)
-        case "$remote_state" in
-          alive) endpoint_exists=true; agent_alive=alive ;;
-          dead) endpoint_exists=true; agent_alive=dead ;;
-          missing) endpoint_exists=false; agent_alive=dead ;;
-          *) endpoint_exists=null; agent_alive=unknown ;;
-        esac
-      else
-        endpoint_exists=null
-        agent_alive=unknown
-      fi
-    else
-      if [ -n "$target" ]; then
-        if fm_backend_target_exists "$backend" "$target" "fm-$id" >/dev/null 2>&1; then
-          endpoint_exists=true
-        else
-          endpoint_exists=false
-        fi
-      fi
-      if [ "$kind" = secondmate ] && [ -n "$target" ]; then
-        agent_alive=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null || printf unknown)
-      fi
-    fi
-
-    [ -f "$report_path" ] && report_present=1 || report_present=0
-    meta_json=$(path_present_json "$meta")
-    status_json=$event_json
-    report_json=$(path_present_json "$report_path")
-    if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
-    if [ -n "$home" ] && [ -n "$remote_host" ]; then
-      home_json=$(jq -n --arg path "$home" --argjson present "$remote_home_present" '{path:$path,present:$present}')
-    elif [ -n "$home" ]; then
-      home_json=$(path_present_json "$home")
-    else
-      home_json=$(jq -n '{path:null,present:false}')
-    fi
-
-    jq -n \
-      --arg id "$id" \
-      --arg kind "$kind" \
-      --arg harness "$harness" \
-      --arg mode "$mode" \
-      --arg yolo "$yolo" \
-      --arg project "$project" \
-      --arg worktree "$worktree" \
-      --arg home "$home" \
-      --arg projects "$projects" \
-      --arg spawn_gen "$spawn_gen" \
-      --arg backend "$backend" \
-      --arg target "$target" \
-      --arg remote_host "$remote_host" \
-      --arg remote_root "$remote_root" \
-      --arg pr "$pr" \
-      --arg pr_source "$pr_source" \
-      --arg agent_alive "$agent_alive" \
-      --arg observed_at "$SNAPSHOT_NOW" \
-      --arg last_event_raw "$last_event_raw" \
-      --argjson current_state "$current_json" \
-      --argjson meta_path "$meta_json" \
-      --argjson status_log "$status_json" \
-      --argjson report "$report_json" \
-      --argjson worktree_path "$worktree_json" \
-      --argjson home_path "$home_json" \
-      --argjson endpoint_exists "$endpoint_exists" \
-      --argjson open_decisions "$open_decisions_json" \
-      --argjson pending_decision "$(bool_json "$pending_decision")" \
-      --argjson blocked_event "$(bool_json "$blocked_event")" \
-      --argjson report_present "$(bool_json "$report_present")" \
-      '{
-        id:$id,
-        kind:$kind,
-        harness:($harness // ""),
-        mode:($mode // ""),
-        yolo:($yolo // ""),
-        project:($project // ""),
-        spawn_gen:($spawn_gen | if . == "" then null else . end),
-        backend:$backend,
-        remote:(if $remote_host == "" then null else {host:$remote_host,root:$remote_root} end),
-        paths:{
-          meta:$meta_path,
-          status_log:$status_log,
-          worktree:$worktree_path,
-          home:$home_path,
-          report:$report
-        },
-        secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
-        current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
-        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
-          status:(if $endpoint_exists == false then "absent"
-                  elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
-                  else "unknown" end),
-          observed_at:$observed_at,freshness:"fresh"},
-        pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
-        hints:{
-          pending_decision:$pending_decision,
-          blocked_event:$blocked_event,
-          open_decisions:$open_decisions,
-          scout_report_present:$report_present,
-          last_event_text:$last_event_raw
-        },
-        actions:(
-          if $kind == "secondmate" then
-            {send:"bin/fm-send.sh fm-\($id) \u0027<request>\u0027",
-             watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",
-             return_channel_note:"Secondmate answers come back through status/doc paths after a marked fm-send request."}
-          else
-            {watch:"bin/fm-peek.sh fm-\($id)",
-             steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
-             return_channel_note:null}
-          end)
-      }'
+    task_json_one "$meta"
   done | jq -s 'sort_by(.id)'
+}
+
+task_json_lines_parallel() {
+  local meta pid launched=0 batch=0
+
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    launched=$((launched + 1))
+    # A worker must not inherit the cancellation traps: its EXIT handler would
+    # delete the working directory its siblings are still writing into.
+    (
+      trap - TERM INT HUP EXIT
+      task_json_one "$meta"
+    ) > "$SNAPSHOT_WORKDIR/task-$launched.json" 2>/dev/null &
+    pid=$!
+    SNAPSHOT_CHILD_PIDS+=("$pid")
+    batch=$((batch + 1))
+    if [ "$batch" -ge "$FM_SNAPSHOT_TASK_CONCURRENCY" ]; then
+      # Plain `wait`, never a pipeline or a substitution: this is the point a
+      # cancelling signal has to be able to interrupt.
+      # A worker that failed leaves an empty file and its row simply drops out
+      # at the assembly below, which is what the serial loop did too.
+      wait || true
+      batch=0
+    fi
+  done
+  [ "$batch" -eq 0 ] || wait || true
+
+  if [ "$launched" -eq 0 ]; then
+    printf '[]\n'
+    return 0
+  fi
+  # Same shape as the serial form: concatenate the rows, then sort by id. A task
+  # whose read produced nothing drops out here exactly as it did before.
+  cat "$SNAPSHOT_WORKDIR"/task-*.json 2>/dev/null | jq -s 'sort_by(.id)'
+}
+
+task_json_lines() {
+  if [ -n "$SNAPSHOT_WORKDIR" ]; then
+    task_json_lines_parallel
+  else
+    task_json_lines_serial
+  fi
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks
@@ -1413,7 +1575,20 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
-TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+# Deliberately NOT `TASKS_JSON=$(task_json_lines)`: bash defers trap handling
+# until a foreground command substitution returns, so a cancelling signal would
+# not be acted on until the very work it is cancelling had finished. Run it in
+# this shell, where its `wait` is interruptible, and read the result back after.
+if snapshot_ensure_workdir; then
+  task_json_lines > "$SNAPSHOT_WORKDIR/tasks.json" \
+    || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+  TASKS_JSON=$(cat "$SNAPSHOT_WORKDIR/tasks.json")
+else
+  # No scratch space: the original serial read, in a substitution that a signal
+  # cannot interrupt. Slower and not cancellable, which is exactly what this
+  # command did everywhere before, so nothing regresses by taking this path.
+  TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+fi
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   secondmate_home_summary_json "$BACKLOG_JSON" "$TASKS_JSON" \
