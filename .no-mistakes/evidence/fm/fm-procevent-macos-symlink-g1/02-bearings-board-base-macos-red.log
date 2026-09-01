@@ -1,0 +1,18 @@
+tests/fm-bearings-board.test.sh at BASE commit 355f46fe5528ccc9790481171bf9da48dee2e90d
+(unmodified -- this file has no diff between base and target), run on the same
+macOS host with a symlinked $TMPDIR:
+
+  $ bash tests/fm-bearings-board.test.sh
+
+ok - path prints the stable home-scoped board location
+ok - build refuses malformed payloads before touching the board
+ok - charted kind is optional and accepts queued and warning
+ok - build injects the payload, binds any-origin, then arms the source
+error: cannot claim source: lavish-a6bb40fe07caa214
+fm-bearings-board: cannot arm the board as a process-event source
+not ok - the order-proof board build failed
+EXIT:1
+
+Confirms the second named suite (tests/fm-bearings-board.test.sh) was also red
+at base on macOS, for the same claim-guard defect: it fails as soon as it
+needs to actually claim a process-event source under the symlinked temp home.

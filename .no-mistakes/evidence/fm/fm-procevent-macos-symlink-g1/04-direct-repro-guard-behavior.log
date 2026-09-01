@@ -1,0 +1,33 @@
+Direct product-level repro of fm_procevent_private_directory_valid on a symlinked
+vs resolved path, comparing base commit 355f46f against target commit 73617bf.
+
+/tmp is itself a symlink to /private/tmp on this macOS host, so this mirrors the
+$TMPDIR -> /private/var/... shape described in the diagnosis without depending on
+$TMPDIR itself.
+
+Setup:
+  mkdir -p /tmp/repro-root/real/dir && chmod 700 /tmp/repro-root/real/dir
+  ln -s /tmp/repro-root/real /tmp/repro-root/link
+  DIR_LINKED=/tmp/repro-root/link/dir             # crosses the /tmp -> /private/tmp symlink
+  DIR_RESOLVED=/private/tmp/repro-root/real/dir   # already physical
+
+Command (run against each checkout):
+  bash -c '. bin/fm-pr-lib.sh; . bin/fm-procevent-lib.sh
+    fm_procevent_private_directory_valid "$DIR_LINKED" 1 && echo accepted || echo rejected
+    fm_procevent_private_directory_valid "$DIR_RESOLVED" 1 && echo accepted || echo rejected'
+
+=== BASE (355f46f) ===
+symlinked path (/tmp/repro-root/link/dir): rejected
+resolved path  (/private/tmp/repro-root/real/dir): accepted
+
+=== TARGET (73617bf, this worktree) ===
+symlinked path (/tmp/repro-root/link/dir): accepted
+resolved path  (/private/tmp/repro-root/real/dir): accepted
+
+Conclusion: at base, the same directory is rejected via its symlinked spelling
+and accepted via its resolved spelling -- exactly the defect described in the
+user intent ("the same directory was rejected via its symlinked path and
+accepted via its resolved path"). At target, both spellings are accepted,
+because fm_procevent_private_directory_valid now compares the physical
+location against fm_procevent_path_physical_expected() (ancestors resolved,
+leaf appended verbatim) instead of the purely lexical normalization.

@@ -1,0 +1,85 @@
+tests/fm-procevent.test.sh at BASE commit 355f46fe5528ccc9790481171bf9da48dee2e90d
+(target's tests/fm-procevent.test.sh copied on top, so the new regression case
+is present), run under a deliberately RESOLVED $TMPDIR -- i.e. the Linux shape,
+with no symlink component in the path at all:
+
+  RESOLVED_TMPDIR=$(cd -P -- "$TMPDIR" && pwd -P)   # /private/var/folders/.../T
+  TMPDIR="$RESOLVED_TMPDIR" bash tests/fm-procevent.test.sh
+
+... 71 pre-existing assertions all "ok" ...
+ok - the published interfaces state the loss limitation and claim no lossless delivery
+not ok - reconcile never claimed the source under a linked state root
+EXIT:1
+
+Every pre-existing assertion in the suite passes -- including the "direct"
+(no symlink) half of the new regression pair -- and the only failure is the
+"linked" half of the new symlink regression test, which builds its own
+symlinked ancestor inside TMP_ROOT regardless of host TMPDIR shape. This is
+the evidence the user intent calls for: "with a deliberately NON-symlinked
+TMPDIR (the Linux shape) the new regression test is the ONLY test that fails
+at base" -- proving the new test would also have caught this defect in CI
+(which runs Linux), not just on this macOS host.
+
+Full "ok"-line list for this run (all pre-existing, all pass):
+  no configured source means no generated state and no process
+  one blocking completion yields exactly one bounded normalized event
+  public start owns the process group recorded by its claim
+  public start never claims an inherited caller process group
+  an unhandled result survives restart and repeat drains, and only explicit acknowledgement stops its re-announcement
+  publication cannot race a handled acknowledgement
+  handled acknowledgement creation is private and fails safely
+  automatic application waits for durable publication and failed publication remains recoverable
+  a self-announcing adapter applies quietly and still publishes what it could not apply
+  an adapter-classified terminal result is captured once, announced, and retires its source automatically
+  a source stays armed unless its own adapter classifies the result terminal
+  terminal retirement preserves and releases a concurrently replaced registration
+  failed terminal retirement is fail-closed and idempotently recoverable
+  one Send & End yields exactly one captured result, automatic retirement, and no recurring poll
+  an empty board close is captured and recorded handled without ever waking the captain
+  a board close carrying the captain's real answer is still announced
+  a transient Lavish poll interruption is retried quietly and never announced
+  an interruption that outlives the bounded retries is captured and announced
+  only the exact interruption is retried; an unrelated SERVER_ERROR still surfaces
+  only the literal two-line interruption enters the quiet retry policy
+  arm rejects malformed and out-of-range retry delays before registration
+  poll cleanup safely handles an apostrophe-containing TMPDIR
+  Lavish classification staging stays bounded while nonmatches stream
+  a drained-but-unhandled result survives a replacement session and is retired only by explicit handling, never twice
+  pending results preserve numeric order and distinct wake identity
+  one owner per canonical source across homes
+  retiring a never-completing source stops its runner and its blocked child
+  reconcile reaps a runner whose source registration is gone
+  stale-owner recovery removes abandoned output without displacing a live owner
+  cross-home stale recovery removes abandoned output from the old state directory
+  concurrent stale-claim replacement starts exactly one runner
+  a crashed runner leader never lets a live owned group be reclaimed as stale
+  a truly dead generation with no surviving group is still safely reclaimed
+  claim replacement cannot produce a torn ownership snapshot
+  retirement and start share one serialized lifecycle boundary
+  PID reuse cannot signal an unrelated process
+  transient identity failure preserves the live source for retry
+  bounded home sweep preflights then retires every locally owned source
+  home sweep leaves foreign-home claims and runners untouched
+  home sweep refuses safely until runner identity is readable
+  healthy runtime behavior remains registration-only
+  registration rejects unrepresentable newline arguments
+  nonzero exit with no output stays armed and silent
+  oversized output is bounded rather than published whole or dropped
+  live output stays bounded and retirement reaps the whole source group
+  invalid output bounds fail closed
+  the adapter derives physical identity without newline path corruption
+  source-only homes trigger the general supervision guard
+  the adapter classifies published poll output safely
+  the adapter owns which Lavish results end a source, and payload text cannot forge one
+  the adapter owns which Lavish results are silent, and fails closed on everything else
+  read presents every annotation and a distinct session-ending message
+  read never certifies rows missing declared fields as complete
+  read keeps every annotation when the session-ending message is absent
+  read surfaces a typed comment on an annotated element
+  read still surfaces a typed comment that matches the element text
+  read still presents a pure annotation with no comment
+  read does not present choice context as a comment
+  read still presents a pure message with no selector
+  read distinguishes a feedback capture from an ended-with-nothing close
+  an adapter with no silence verdict keeps announcing every result
+  the published interfaces state the loss limitation and claim no lossless delivery

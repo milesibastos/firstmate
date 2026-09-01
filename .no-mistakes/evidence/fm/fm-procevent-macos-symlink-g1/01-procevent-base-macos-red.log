@@ -1,0 +1,18 @@
+tests/fm-procevent.test.sh at BASE commit 355f46fe5528ccc9790481171bf9da48dee2e90d
+(target's tests/fm-procevent.test.sh copied on top so the new regression case
+is present), run unmodified on this macOS host where $TMPDIR sits under
+/var -> /private/var:
+
+  $ bash tests/fm-procevent.test.sh
+
+ok - no configured source means no generated state and no process
+not ok - reconcile never claimed the registered source
+EXIT:1
+
+The suite dies at the second assertion -- an ordinary, pre-existing claim
+(no symlink-specific test reached yet) -- because on macOS the whole temp
+tree used by the test harness is reached through a symlinked ancestor, and
+the base guard (`fm_procevent_private_directory_valid`, comparing physical
+location against a purely lexical path normalization) rejects every such
+directory. This matches the reported symptom: "Two test suites ... could
+not run on macOS at all: red at base on unmodified files."
