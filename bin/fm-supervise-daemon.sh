@@ -467,7 +467,10 @@ classify_unknown() {  # <reason>
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last reported file signature and
 #           classified byte offset, so failures and events do not re-fire while
-#           unread bytes remain recoverable.
+#           unread bytes remain recoverable. It dedupes this daemon's own paths
+#           only; status_seen_offset floors it against the fleet-wide
+#           presentation cursor so a stretch firstmate supervised alone is not
+#           replayed here.
 
 _stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
 
@@ -564,14 +567,26 @@ _seen_status_path() {  # <state> <task>
   status_daemon_seen_marker_path "$1" "$2"
 }
 
-# The byte offset in <task>'s status log through which this daemon has
-# successfully classified content, or 0 when it has no usable position.
+# The byte offset in <task>'s status log at or before which this daemon must not
+# report an event: the later of its own classified-through position and the
+# fleet-wide presentation cursor that bin/fm-classify-lib.sh owns.
 # A position rather than an event line prevents both a later routine append from
 # hiding earlier events and repeated event text from suppressing a new occurrence.
-# An absent, malformed, identity-mismatched, or legacy marker reads 0, so the
-# whole log is classified and uncertainty prefers a duplicate over event loss.
+# The private marker is only a within-daemon dedupe, so on its own every stretch
+# in which firstmate supervised while this daemon was stopped becomes a replay
+# window at the next away-mode entry; the shared cursor is another actor's proof
+# that it already presented those bytes, and taking the later of the two also
+# keeps the private marker authoritative while it leads.
+# An absent, malformed, identity-mismatched, or legacy private marker reads 0,
+# and an unreadable or corrupt shared cursor contributes nothing, so uncertainty
+# still prefers a duplicate over event loss.
 status_seen_offset() {  # <state> <task>
-  status_presentation_marker_offset "$(_seen_status_path "$1" "$2")" "$1/$2.status"
+  local private shared
+  private=$(status_presentation_marker_offset "$(_seen_status_path "$1" "$2")" "$1/$2.status")
+  shared=$(status_presentation_cursor_offset "$1/$2.status" 2>/dev/null) || shared=0
+  case "$private" in ''|*[!0-9]*) private=0 ;; esac
+  case "$shared" in ''|*[!0-9]*) shared=0 ;; esac
+  if [ "$shared" -gt "$private" ]; then printf '%s' "$shared"; else printf '%s' "$private"; fi
 }
 
 # Commit <task>'s successfully classified endpoint, so the heartbeat catch-all

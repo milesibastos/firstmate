@@ -570,6 +570,86 @@ test_catchall_scan_surfaces_a_masked_event() {
   pass "the away-mode catch-all scan surfaces a masked event once"
 }
 
+test_catchall_scan_respects_the_shared_presentation_cursor() {
+  local dir state head_seen head_rest head presented later tail buffer
+  local a_cursor b_cursor a_private snapshot
+  dir=$(make_supercase catchall-shared-cursor)
+  state="$dir/state"
+  buffer="$state/.subsuper-escalations"
+
+  # Both logs end with byte-identical content whose only captain-relevant line is
+  # a done: at line 4, buried under later working: appends. The ONLY difference is
+  # where the fleet-wide presentation cursor sits when the catch-all scan runs:
+  # past the done: for a1 (firstmate already presented it while this daemon was
+  # stopped) and behind it for b1 (nobody has presented it yet).
+  head_seen='working: setup
+working: scaffolding
+'
+  head_rest='working: first pass
+'
+  head="$head_seen$head_rest"
+  presented='done: lock acquire path now proves holder identity
+working: second decision cycle
+working: third decision cycle
+working: rebasing
+working: validation started
+'
+  later='working: validation running
+working: fixing review findings
+working: validation running again
+'
+  tail="$presented$later"
+  # cursor-a1 mirrors the report exactly: the daemon's own marker is PRESENT but
+  # left behind by the previous away session, two lines short of the done:.
+  printf '%s' "$head_seen" > "$state/cursor-a1.status"
+  seen_through "$state" cursor-a1
+  a_private=$(log_size "$state/cursor-a1.status")
+  printf '%s%s' "$head_rest" "$presented" >> "$state/cursor-a1.status"
+  printf '%s' "$head" > "$state/cursor-b1.status"
+
+  # Commit the shared cursor through the classify-lib owner rather than writing
+  # manifest bytes by hand, so the test exercises the same publication path
+  # firstmate's own wake drain uses.
+  snapshot=$(status_presentation_snapshot "$state") \
+    || fail "could not snapshot the status logs"
+  status_commit_presentation_snapshot "$state" "$snapshot" \
+    || fail "could not publish the shared presentation cursor"
+  a_cursor=$(log_size "$state/cursor-a1.status")
+  b_cursor=$(log_size "$state/cursor-b1.status")
+
+  printf '%s' "$later" >> "$state/cursor-a1.status"
+  printf '%s' "$tail" >> "$state/cursor-b1.status"
+
+  [ "$(log_size "$state/cursor-a1.status")" = "$(log_size "$state/cursor-b1.status")" ] \
+    || fail "the two logs must end byte-identical so only cursor position differs"
+  assert_absent "$state/.subsuper-seen-status-cursor-b1" \
+    "this daemon must start with no private position of its own for cursor-b1"
+  # The divergence under test, asserted directly: a1's own marker is present and
+  # behind the done:, b1 has none, and the shared cursor sits past the done: only
+  # for a1. Without that disagreement the case would prove nothing.
+  [ "$(status_presentation_marker_offset "$state/.subsuper-seen-status-cursor-a1" "$state/cursor-a1.status")" = "$a_private" ] \
+    || fail "cursor-a1 should carry its own recorded position from the previous away session"
+  [ "$a_private" -gt 0 ] && [ "$a_private" -lt "$a_cursor" ] \
+    || fail "the private marker must trail the shared cursor for this case to test the floor"
+  [ "$(status_seen_offset "$state" cursor-a1)" = "$a_cursor" ] \
+    || fail "the scan position did not adopt the shared cursor that leads its own marker"
+  [ "$(status_seen_offset "$state" cursor-b1)" = "$b_cursor" ] \
+    || fail "the scan position did not adopt the shared cursor for cursor-b1"
+  [ "$a_cursor" -gt "$b_cursor" ] \
+    || fail "the two cursors must actually disagree for this case to test anything"
+
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+
+  # b1 proves the scan ran and still surfaces an unpresented done:; without it a
+  # housekeeping that never reached the catch-all would pass the a1 assertion.
+  grep -F "cursor-b1.status: done: lock acquire path" "$buffer" >/dev/null 2>&1 \
+    || fail "the catch-all scan did not surface a done: nobody had presented yet"
+  ! grep -F "cursor-a1.status" "$buffer" >/dev/null 2>&1 \
+    || fail "the catch-all scan replayed an event the shared cursor proves was already presented"
+  pass "the away-mode catch-all scan does not replay events behind the shared presentation cursor"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -2690,6 +2770,7 @@ test_transient_unreadable_signal_recovers_without_advancing
 test_permission_recovery_reclassifies_catchall_status
 test_permanent_classification_failure_is_reported_and_acknowledged
 test_catchall_scan_surfaces_a_masked_event
+test_catchall_scan_respects_the_shared_presentation_cursor
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale
