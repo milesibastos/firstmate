@@ -1171,6 +1171,65 @@ SH
   chmod +x "$bindir/ps"
 }
 
+test_lock_exec_replaced_holder_still_holds() {
+  local dir state lockdir holder lockpid recorded current out i
+  dir=$(make_case lock-exec-replaced)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder="$dir/holder"
+  # The ordinary holder idiom, written the way callers and other suites write
+  # it: acquire, then wait. Bash replaces a shell with the LAST SIMPLE COMMAND
+  # of its script, so this process execs into sleep - same pid, same start
+  # time, new command - while still alive and still holding the lock. Note the
+  # deliberate absence of a trailing builtin here; lock_hold_start adds one
+  # precisely to suppress this replacement, and this case needs it to happen.
+  : > "$holder"
+  (
+    export FM_STATE_OVERRIDE="$state"
+    # shellcheck source=/dev/null
+    . "$LIB"
+    fm_lock_try_acquire "$lockdir" || exit 1
+    printf '%s\n' "${BASHPID:-$$}" > "$holder"
+    sleep 20
+  ) >/dev/null 2>&1 &
+  LOCK_HOLD_PID=$!
+  i=0
+  while [ "$i" -lt 200 ] && [ ! -s "$holder" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$holder" ] || { lock_hold_stop; fail "exec-replaced holder did not take the lock"; }
+  lockpid=$(cat "$holder")
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  current=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$lockpid" 2>/dev/null || true)
+  out=$(lock_acquire_probe "$state" "$lockdir")
+  lock_hold_stop
+
+  # Assert the divergence rather than assuming it: if bash ever stops replacing
+  # the shell, this case would silently stop exercising anything.
+  [ -n "$recorded" ] && [ -n "$current" ] \
+    || fail "exec-replaced holder produced no identities to compare"
+  [ "$recorded" != "$current" ] \
+    || fail "bash did not replace the holder shell, so this case proves nothing (identity '$recorded')"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a live holder whose shell was replaced by its last command had its lock stolen: $out" ;;
+  esac
+  case "$out" in
+    *"held=$lockpid"*) ;;
+    *) fail "exec-replaced live holder not reported as the holder: $out" ;;
+  esac
+  case "$out" in
+    *"proof=identity-start-only"*) ;;
+    *) fail "exec-replaced holder was kept for a reason other than its start time: $out" ;;
+  esac
+  case "$out" in
+    *"lockpid=$lockpid"*) ;;
+    *) fail "exec-replaced holder's lock pid was clobbered: $out" ;;
+  esac
+  pass "a holder whose shell is replaced by its last command still holds its lock"
+}
+
 test_lock_records_holder_identity() {
   local dir state lockdir holder recorded computed
   dir=$(make_case lock-records-identity)
@@ -1399,6 +1458,7 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_records_holder_identity
+test_lock_exec_replaced_holder_still_holds
 test_lock_live_holder_is_not_stolen_when_idle
 test_lock_recycled_pid_does_not_read_as_holder
 test_lock_stale_record_with_identity_and_no_process_is_reclaimed

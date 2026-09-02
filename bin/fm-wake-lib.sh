@@ -407,6 +407,31 @@ fm_lock_remove_stray_owner_link() {
   fi
 }
 
+# fm_identity_start_component <identity>
+# Print the START-TIME half of an identity string produced by fm_pid_identity,
+# tagged with the form it came from, or fail when the string carries no usable
+# start time. Both forms fm_pid_identity emits are handled:
+#   "<key>=<ticks> cmdline-hex=<hex>"  -> "proc <key>=<ticks>"
+#   "<lstart> <command>"               -> "ps <five lstart fields>"
+# This reads fm_pid_identity's existing output; it never changes what that
+# function emits, because identities recorded by already-running processes and
+# by locks already held in live homes must keep matching what new code computes.
+fm_identity_start_component() {
+  local identity=$1
+  local -a fields
+  case "$identity" in
+    proc-starttime=*|linux-starttime=*)
+      printf 'proc %s\n' "${identity%% *}"
+      return 0
+      ;;
+  esac
+  # ps lstart is five whitespace-separated fields: DoW Mon DD HH:MM:SS YYYY.
+  read -r -a fields <<< "$identity"
+  [ "${#fields[@]}" -ge 5 ] || return 1
+  printf 'ps %s %s %s %s %s\n' \
+    "${fields[0]}" "${fields[1]}" "${fields[2]}" "${fields[3]}" "${fields[4]}"
+}
+
 # fm_lock_holder_is_current <lockdir> <pid>
 # True while <pid> is still the process that took <lockdir>.
 #
@@ -418,14 +443,34 @@ fm_lock_remove_stray_owner_link() {
 # named fm_lock_mid_acquire_is_fresh and in each caller's own staleness proof.
 #
 # Sets FM_LOCK_HOLDER_PROOF to the evidence behind the verdict:
-#   identity      held, and the recorded identity recomputed and matched
+#   identity      held, and the whole recorded identity recomputed and matched
+#   identity-start-only
+#                 held on start time alone: same process, different command (see
+#                 the bash note below)
 #   liveness-only held, but the lock records no identity to check (a lock taken
 #                 by an older build, or on a host where no identity fact could
 #                 be computed at acquisition)
 #   unprovable    held, an identity IS recorded, but it cannot be recomputed now
-#   mismatch      NOT held: the pid answers to a different identity, so the
-#                 recorded holder is gone and this pid was reused
+#                 or cannot be compared with what is recorded
+#   mismatch      NOT held: the pid started at a different time, so the recorded
+#                 holder is gone and this pid was reused
 #   dead          NOT held: no such process
+#
+# START TIME DECIDES; THE COMMAND ONLY CORROBORATES. A shell replaces itself
+# with the last simple command of its script, so the ordinary holder idiom
+# `( acquire_lock; some_command ) &` execs into some_command: same pid, same
+# start time, NEW command, still alive and still holding the lock. Treating that
+# command change as proof of a recycled pid evicts a live, correct holder, which
+# is worse than the recovery-suppression bug this check exists to fix - it
+# produces two owners of something that exists to have one. The command is still
+# recorded and still compared, because a divergence is worth reporting, but it
+# never vetoes. Do not reinstate it as a veto: its absence here is deliberate.
+#
+# What defeats pid recycling was never the command. It is the start time, and a
+# recycled pid can only pass that by having its new occupant start inside the
+# same clock tick (/proc) or the same second (ps) as the old one, against a
+# measured full pid-space wrap of 65 to 90 seconds - about a 75x margin on the
+# weaker of the two platforms.
 #
 # The two unproven-but-held verdicts fail SAFE toward the current holder.
 # Refusing to steal a lock whose ownership cannot be disproved leaves recovery
@@ -441,7 +486,7 @@ fm_lock_remove_stray_owner_link() {
 # no recorded identity and must keep reading as held.
 FM_LOCK_HOLDER_PROOF=
 fm_lock_holder_is_current() {
-  local lockdir=$1 pid=$2 recorded current
+  local lockdir=$1 pid=$2 recorded current recorded_start current_start
   FM_LOCK_HOLDER_PROOF=dead
   fm_pid_alive "$pid" || return 1
   recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
@@ -453,11 +498,27 @@ fm_lock_holder_is_current() {
     FM_LOCK_HOLDER_PROOF=unprovable
     return 0
   fi
-  if [ "$current" != "$recorded" ]; then
+  if [ "$current" = "$recorded" ]; then
+    FM_LOCK_HOLDER_PROOF=identity
+    return 0
+  fi
+  # The strings differ. Only the start-time half decides.
+  if ! recorded_start=$(fm_identity_start_component "$recorded") \
+    || ! current_start=$(fm_identity_start_component "$current"); then
+    FM_LOCK_HOLDER_PROOF=unprovable
+    return 0
+  fi
+  # Identities recorded in one form and re-read in the other carry no comparable
+  # fact, so they are unprovable rather than proof of a reused pid.
+  if [ "${recorded_start%% *}" != "${current_start%% *}" ]; then
+    FM_LOCK_HOLDER_PROOF=unprovable
+    return 0
+  fi
+  if [ "$recorded_start" != "$current_start" ]; then
     FM_LOCK_HOLDER_PROOF=mismatch
     return 1
   fi
-  FM_LOCK_HOLDER_PROOF=identity
+  FM_LOCK_HOLDER_PROOF='identity-start-only'
   return 0
 }
 
