@@ -1,0 +1,59 @@
+=== bin/fm-test-run.sh --check-coverage ===
+FM_TEST_COVERAGE ok total=178 parallel=24 serial=142 serial_shards=7 herdr=12
+
+=== bin/fm-test-run.sh --list-lanes (portable-serial-*of7) ===
+portable-serial-1of7
+portable-serial-2of7
+portable-serial-3of7
+portable-serial-4of7
+portable-serial-5of7
+portable-serial-6of7
+portable-serial-7of7
+
+=== ci.yml matrix vs shard count (must agree) ===
+        shard: [1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v6
+
+=== Per-shard hint-weight sums, computed from the real runner's --list output ===
+(joins each shard's actual member scripts against the weight-hint table; default 27000ms for unhinted)
+lane                     count    sum_ms     min  unhinted
+portable-serial-1of7        21    560002    9.33  []
+portable-serial-2of7        20    559982    9.33  []
+portable-serial-3of7        19    559982    9.33  []
+portable-serial-4of7        19    559994    9.33  ['tests/fm-pr-attestation-settle.test.sh']
+portable-serial-5of7        22    560001    9.33  []
+portable-serial-6of7        20    559998    9.33  []
+portable-serial-7of7        21    559997    9.33  []
+
+total scripts=142 total_min=65.33
+hinted scripts=141, mean hint=27609.6 ms; PORTABLE_SERIAL_DEFAULT_WEIGHT_MS=27000 (close to mean, per acceptance requirement)
+note: 142nd (unhinted) script tests/fm-pr-attestation-settle.test.sh landed via the main merge required by user intent; adding it re-cascades the LPT packing, so per-shard membership and counts differ from the doc's run-33585388230 table -- every shard's hint sum rises ~4s (556s -> 560s, 27000/7), projection still rounds to 9.3 min. Expected drift from the required merge, not a defect; doc table is explicitly the packing of the run that introduced this layout.
+=== tests/fm-test-run.test.sh contract suite (portable serial partition/coverage/refusal assertions) ===
+ok - exact suite coverage: --all lists every tests/*.test.sh once
+ok - family selection returns a proper subset of the suite
+ok - single-script selection lists exactly that path
+ok - changed-file selection stays conservative (never silent full suite)
+ok - runner and its documentation surfaces select their curated family, not just their contract owners
+ok - changed selection covers dependents and fails closed for unmapped source
+ok - a bin reference selects the referencing scripts, and consumers still select their curated families
+ok - changed defaults to bounded automatic scheduling with serial override
+ok - empty changed selection emits deterministic text and JSON summaries
+ok - timing markers and JSON artifact are valid
+ok - aggregate exit reflects any script failure
+ok - gate-skip accounting is honest and non-failing
+ok - fail-on-gate-skip converts herdr-not-found into a hard failure
+ok - exclude-family drops the named primary family after selection
+ok - portable shard union, disjointness, and coverage guard hold
+ok - portable serial shards are a deterministic disjoint cover of the serial lane
+ok - portable serial shard lanes refuse mismatched, out-of-range, and countless names
+ok - --jobs refuses non-proven / stateful selections
+ok - --jobs admits and schedules a family with a recorded concurrent proof
+ok - a concurrent run starts the longest-hint script first
+ok - --per-script-timeout-secs turns a hung script into a bounded failure
+ok - --max-wall-ms fails an over-budget run and refuses a malformed budget
+ok - jobs scheduler runs proven scripts; failure propagates; non-proven refused
+ok - Herdr CI family-run step times out at 20 min under a 75 min job backstop
+ok - aggregate-json merges lane timing artifacts
+
+[exited with code 0]
