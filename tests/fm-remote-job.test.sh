@@ -604,15 +604,22 @@ QUARANTINED_PROCESS_PID=$!
 sleep 0.01 &
 QUARANTINE_OWNER_PID=$!
 wait "$QUARANTINE_OWNER_PID" 2>/dev/null || true
-printf '%s\n' "$QUARANTINE_OWNER_PID" > "$RECOVERY_STATE/worker.lock/pid"
-printf 'stale\n' > "$RECOVERY_STATE/worker.lock/start"
-printf 'stale\n' > "$RECOVERY_STATE/worker.lock/command"
-printf 'active execution could not be confirmed stopped\n' > "$RECOVERY_STATE/worker.lock/quarantine"
-printf 'running\n' > "$RECOVERY_JOB/state"
-printf '%s\n' "$QUARANTINE_OWNER_PID" > "$RECOVERY_JOB/.claim/owner"
-printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/supervisor"
-: > "$RECOVERY_JOB/stdout"
-: > "$RECOVERY_JOB/stderr"
+printf '%s\n' "$QUARANTINE_OWNER_PID" > "$RECOVERY_STATE/worker.lock/pid" \
+  || fail "setup: could not record the quarantine owner pid"
+printf 'stale\n' > "$RECOVERY_STATE/worker.lock/start" \
+  || fail "setup: could not record the stale worker lock start"
+printf 'stale\n' > "$RECOVERY_STATE/worker.lock/command" \
+  || fail "setup: could not record the stale worker lock command"
+printf 'active execution could not be confirmed stopped\n' > "$RECOVERY_STATE/worker.lock/quarantine" \
+  || fail "setup: could not record the quarantine reason"
+printf 'running\n' > "$RECOVERY_JOB/state" \
+  || fail "setup: could not record the recovery job state"
+printf '%s\n' "$QUARANTINE_OWNER_PID" > "$RECOVERY_JOB/.claim/owner" \
+  || fail "setup: could not record the recovery job claim owner"
+printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/supervisor" \
+  || fail "setup: could not record the recovery job claim supervisor"
+: > "$RECOVERY_JOB/stdout" || fail "setup: could not create the recovery job stdout file"
+: > "$RECOVERY_JOB/stderr" || fail "setup: could not create the recovery job stderr file"
 chmod 600 "$RECOVERY_STATE/worker.lock"/* "$RECOVERY_JOB/state" "$RECOVERY_JOB/.claim"/* \
   "$RECOVERY_JOB/stdout" "$RECOVERY_JOB/stderr" \
   || fail "setup: could not confine the quarantined ownership and claim records"
@@ -624,9 +631,12 @@ HOME="$RECOVERY_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="
 RECOVERY_REFUSED_RC=$?
 [ "$RECOVERY_REFUSED_RC" -ne 0 ] || fail "quarantine recovery ignored a recorded live process"
 assert_present "$RECOVERY_STATE/worker.lock/quarantine" "a live recorded process lost quarantine protection"
-printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/owner"
-printf 'stale owner identity\n' > "$RECOVERY_JOB/.claim/owner_start"
-printf 'stale supervisor identity\n' > "$RECOVERY_JOB/.claim/supervisor_start"
+printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/owner" \
+  || fail "setup: could not record the reused-pid claim owner"
+printf 'stale owner identity\n' > "$RECOVERY_JOB/.claim/owner_start" \
+  || fail "setup: could not record the reused-pid claim owner_start"
+printf 'stale supervisor identity\n' > "$RECOVERY_JOB/.claim/supervisor_start" \
+  || fail "setup: could not record the reused-pid claim supervisor_start"
 chmod 600 "$RECOVERY_JOB/.claim/owner" "$RECOVERY_JOB/.claim/owner_start" \
   "$RECOVERY_JOB/.claim/supervisor_start" \
   || fail "setup: could not confine the reused-pid claim records"
@@ -732,8 +742,9 @@ cp "$ROOT/bin/fm-remote-job-lib.sh" "$RESTART_ROOT/bin/" \
   || fail "setup: could not stage the job library under the restart-guard root"
 cp "$ROOT/bin/fm-remote-job-worker.sh" "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
   || fail "setup: could not stage the supervisor under test"
-printf 'fixture\n' > "$RESTART_ROOT/AGENTS.md"
-cat > "$RESTART_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
+printf 'fixture\n' > "$RESTART_ROOT/AGENTS.md" \
+  || fail "setup: could not write the restart-guard AGENTS.md fixture"
+cat > "$RESTART_ROOT/bin/fm-remote-job-worker.sh" <<'SH' || fail "setup: could not write the restart worker fixture"
 #!/bin/bash
 set -u
 [ "${1:-}" = --serve ] || exit 2
