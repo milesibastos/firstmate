@@ -251,9 +251,9 @@ pass "the publisher is detached from the shell and process group that started it
 # none of them exercise what happens when the launch itself never comes up.
 # This reproduces exactly that: a copy of this script with its execute bit
 # removed, so the exec inside launch_publisher fails the same way this
-# script's own removed nohup dependency used to fail in a console-less
-# sandbox - and start must name that failure rather than only report that it
-# could not confirm a publisher.
+# script's own removed nohup dependency used to fail in the sandbox these
+# launchers are tested in - and start must name that failure rather than only
+# report that it could not confirm a publisher.
 FAKE_BIN="$TMP_ROOT/fakebin"
 FAKE_HOME="$TMP_ROOT/fakebin-home"
 mkdir -p "$FAKE_BIN"

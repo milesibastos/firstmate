@@ -242,7 +242,14 @@ EOF
   #     reads to EOF; a worker holding that pipe open would strand session
   #     initialization behind the very work this stage exists to take off the
   #     blocking path.
-  #   - nohup, so the worker outlives the shell that launched it.
+  #   - immunity to the launching shell's HUP, so the worker outlives it. A
+  #     `trap '' HUP` in a subshell that then execs, rather than nohup: nohup
+  #     exits 127 in at least one sandbox this launcher's own tests run in, and
+  #     there it would take the worker with it - `start` would still return 0 and
+  #     record a `running` worker that never ran, leaving every session's network
+  #     checks to time out into "stopped before publishing". Trapping directly
+  #     buys the same immunity with a shell builtin that cannot go missing, and
+  #     keeps the launcher testable in that sandbox instead of needing a shim.
   #   - its OWN process group (monitor mode), because the caller runs inside the
   #     digest's bounded child and that bound terminates its whole process group.
   #     Sharing the group would kill the worker on a truncated startup and, worse,
@@ -253,9 +260,11 @@ EOF
   local monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  nohup "$SCRIPT_DIR/fm-startup-network.sh" run --locked "$locked" --lock-pid "$lock_pid" \
-    --generation "$generation" \
-    >/dev/null 2>&1 </dev/null &
+  (
+    trap '' HUP
+    exec "$SCRIPT_DIR/fm-startup-network.sh" run --locked "$locked" --lock-pid "$lock_pid" \
+      --generation "$generation"
+  ) >/dev/null 2>&1 </dev/null &
   worker_pid=$!
   if ! write_atomic "$STATUS_FILE" <<EOF
 state=running

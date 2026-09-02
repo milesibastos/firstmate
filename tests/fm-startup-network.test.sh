@@ -8,6 +8,8 @@
 # to make deferral safe:
 #   - `start` returns immediately and does not hold the caller's stdout open,
 #     which is what would strand a session-open hook behind the worker
+#   - the worker is launched and detached without depending on `nohup`, which is
+#     unusable in at least one sandbox this suite runs in
 #   - a durable acknowledgement after harvest prints a finished result suppresses
 #     the wake, while an unacknowledged result always produces one
 #   - mutating sweeps are refused when the fleet lock no longer names the session
@@ -161,6 +163,64 @@ EOF
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the worker never published"
   assert_grep 'network=only' "$log" "the worker did not run bootstrap's network-only phase"
   pass "fm-startup-network: start returns immediately and never holds the caller's stdout open"
+}
+
+# The worker must survive the shell that launched it, and the launcher must not
+# buy that survival from a tool that can be missing. `nohup` exits 127 in at
+# least one sandbox this suite runs in; because the launcher backgrounds a child
+# and only ever sees `$!`, an unusable `nohup` is invisible to it - `start` would
+# return 0 and record a `running` worker that never ran, so every session's
+# network checks would time out into "stopped before publishing" instead of
+# reporting a broken launcher.
+#
+# So the contract is asserted against exactly that failure: a `nohup` on PATH
+# that exits 127. `run_stage` already prepends the world's bin/, so the stub is
+# what the launcher would resolve. The worker must still come up, publish, and
+# still be detached - its own process group, and not a child of this shell.
+test_start_launches_its_worker_without_nohup() {
+  local rec home root log worker_pid pgid ppid waited
+  rec=$(new_world start-without-nohup)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  printf '#!/usr/bin/env bash\nexit 127\n' > "$root/bin/nohup"
+  chmod +x "$root/bin/nohup"
+
+  # A sleeping worker is still alive while its detachment is inspected below.
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=10 \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$ >/dev/null
+  await_worker_record "$home"
+
+  worker_pid=$(sed -n 's/^pid=//p' "$home/state/.startup-network.status")
+  case "$worker_pid" in ''|0|*[!0-9]*) fail "start recorded no usable worker pid: $worker_pid" ;; esac
+
+  # The discriminating assertion, and it deliberately is not `kill -0`: the
+  # recorded pid is whatever the launcher backgrounded, so against the pre-fix
+  # launcher it answered `kill -0` and `ps -o pgid=` while still being a child
+  # that was only starting up or exiting, never a worker. Only the worker's own
+  # side effect separates the two, so wait for the phase the fake bootstrap logs
+  # before it sleeps.
+  waited=0
+  while [ ! -s "$log" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -s "$log" ] \
+    || fail "start recorded worker pid=$worker_pid but no worker ever ran: an unusable nohup was reported as a launched worker"
+
+  pgid=$(ps -o pgid= -p "$worker_pid" 2>/dev/null | tr -d '[:space:]')
+  [ "$pgid" = "$worker_pid" ] \
+    || fail "the worker must run in its own process group, got pgid=$pgid for pid=$worker_pid"
+  ppid=$(ps -o ppid= -p "$worker_pid" 2>/dev/null | tr -d '[:space:]')
+  [ "$ppid" != "$$" ] \
+    || fail "the worker must not remain a child of the shell that started it"
+
+  run_stage "$home" "$root" wait 30 >/dev/null \
+    || fail "the worker never published with nohup unusable"
+  assert_grep 'network=only' "$log" \
+    "the worker did not run bootstrap's network-only phase with nohup unusable"
+  pass "fm-startup-network: start launches and detaches its worker without depending on nohup"
 }
 
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it() {
@@ -693,6 +753,7 @@ GITHUB_TOKEN=ghp_supersecretvalue" \
 
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
+test_start_launches_its_worker_without_nohup
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
 test_a_claimant_crash_after_publish_still_queues_the_wake
 test_a_report_publication_failure_is_failed_and_still_wakes
