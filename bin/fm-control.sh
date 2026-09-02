@@ -891,7 +891,8 @@ do_relaunch() {
 #      leaves the recorded target unresolvable while its agent runs on, and
 #      rebuilding then would put a second agent on one worktree.
 #   3. The recorded worktree passes the same checkpoint a relaunch runs, and no
-#      live process is holding it.
+#      live process is holding it - or the holder check is disclosed as
+#      unavailable rather than reported as proof.
 # After rebuilding it confirms the endpoint exists, classifies agent-free, and
 # settled in the recorded worktree; if it did not, it removes the endpoint it
 # just created rather than leaving a broken one behind.
@@ -902,10 +903,10 @@ do_relaunch() {
 # is `treehouse get`, which must be skipped, because the worktree already exists
 # and the pane is already in it - which is exactly what this verb establishes.
 
-# reconcile_worktree_holder_report: the recovery path's second, independent read
-# on "is anything still running for this task" - a live process holding the
-# recorded worktree. Prints a report line and returns 1 when the worktree is
-# provably free or the check is unavailable, 0 when it must refuse.
+# reconcile_worktree_holder_refuses: the recovery path's second, independent
+# read on "is anything still running for this task" - a live process holding
+# the recorded worktree. Sets RECONCILE_HOLDER_NOTE and returns 1 when the
+# worktree is provably free or the check is unavailable, 0 when it must refuse.
 RECONCILE_HOLDER_NOTE=
 reconcile_worktree_holder_refuses() {
   local status
