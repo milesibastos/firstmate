@@ -552,14 +552,11 @@ backlog_row_state() {
 
 # Build the teardown test's executable search path without lsof, regardless of
 # whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
-# od stays: on a /proc host fm_pid_identity (bin/fm-wake-lib.sh) hexes
-# /proc/<pid>/cmdline through it, and the lsof-absent fallback identifies the
-# pane leader with that primitive before it signals anything.
 make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv od perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
