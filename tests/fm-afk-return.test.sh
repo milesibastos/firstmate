@@ -15,14 +15,16 @@ TMP_ROOT=$(fm_test_tmproot fm-afk-return-tests)
 
 install_runner() {  # <case-dir>
   local dir=$1
-  mkdir -p "$dir/bin" "$dir/home/state" "$dir/home/data" "$dir/home/config"
-  cp "$ROOT/bin/fm-afk-return.sh" "$dir/bin/"
-  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
-  cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/"
+  mkdir -p "$dir/bin" "$dir/home/state" "$dir/home/data" "$dir/home/config" \
+    || fail "the return-gate case directories could not be created"
+  cp "$ROOT/bin/fm-afk-return.sh" "$dir/bin/" || fail "the return script could not be staged"
+  cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/" || fail "the wake library could not be staged"
+  cp "$ROOT/bin/fm-classify-lib.sh" "$dir/bin/" || fail "the classify library could not be staged"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
   # wedge detector's bounded worktree write probe.
-  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/"
-  cat > "$dir/bin/fm-afk-launch.sh" <<'SH'
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$dir/bin/" || fail "the timeout library could not be staged"
+  cat > "$dir/bin/fm-afk-launch.sh" <<'SH' \
+    || fail "the fake away-mode launcher could not be written"
 #!/usr/bin/env bash
 [ "${1:-}" = stop ] || exit 2
 printf 'stop\n' >> "$FM_HOME/stop.log"
@@ -33,7 +35,8 @@ if [ -e "$FM_HOME/state/.fail-terminal-stop-once" ]; then
 fi
 rm -f "$FM_HOME/state/.afk-daemon-terminal"
 SH
-  cat > "$dir/bin/fm-wake-drain.sh" <<'SH'
+  cat > "$dir/bin/fm-wake-drain.sh" <<'SH' \
+    || fail "the fake wake drain could not be written"
 #!/usr/bin/env bash
 file="$FM_HOME/state/.fake-drain"
 if [ "${1:-}" = --ack-through ]; then
@@ -48,7 +51,7 @@ if [ -s "$file" ]; then
   printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-generation\n' "$sequence" >&2
 fi
 SH
-  chmod +x "$dir/bin/"*.sh
+  chmod +x "$dir/bin/"*.sh || fail "the staged case scripts could not be made executable"
 }
 
 run_return() {  # <case-dir> <mode>
@@ -71,12 +74,14 @@ seed_live_blocker() {  # <case-dir> <backend> <key>
     tmux) target='synthetic:fm-repair-task' ;;
     herdr) target='fm-lab-synthetic:w1:p2' ;;
   esac
-  cat > "$dir/home/state/repair-task.meta" <<EOF
+  cat > "$dir/home/state/repair-task.meta" <<EOF \
+    || fail "the blocked task record could not be written"
 window=$target
 backend=$backend
 kind=ship
 EOF
-  printf 'blocked [key=%s]: firstmate can refresh the synthetic token\n' "$key" > "$dir/home/state/repair-task.status"
+  printf 'blocked [key=%s]: firstmate can refresh the synthetic token\n' "$key" \
+    > "$dir/home/state/repair-task.status" || fail "the blocked status fixture could not be written"
 }
 
 test_return_gate_orders_catchup_before_bearings() {
@@ -84,18 +89,18 @@ test_return_gate_orders_catchup_before_bearings() {
   dir="$TMP_ROOT/ordering"
   install_runner "$dir"
   seed_live_blocker "$dir" herdr synthetic-dependency
-  date +%s > "$dir/home/state/.afk"
-  printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
-  printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
+  date +%s > "$dir/home/state/.afk" || fail "the away-mode marker could not be written"
+  printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations" \
+    || fail "the buffered escalation fixture could not be written"
+  printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged" \
+    || fail "the wedge marker fixture could not be written"
   {
     printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n'
     printf 'wake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency\n'
-  } > "$dir/home/state/.fake-drain"
+  } > "$dir/home/state/.fake-drain" || fail "the drained wake fixture could not be written"
 
-  set +e
   out=$(run_return "$dir" begin)
   rc=$?
-  set -e
   [ "$rc" -eq 3 ] || fail "return begin should gate on a live blocker (rc=$rc): $out"
   gate="$dir/home/state/.afk-return-catchup"
   [ -s "$gate" ] || fail "return begin did not persist its fail-closed catch-up gate"
@@ -111,19 +116,15 @@ test_return_gate_orders_catchup_before_bearings() {
 
   # The exact incident regression: Bearings is an ordinary request and must
   # refuse before reading/rendering while this shared gate remains open.
-  set +e
   out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-bearings-snapshot.sh" --json 2>&1)
   rc=$?
-  set -e
   [ "$rc" -eq 3 ] || fail "Bearings should refuse behind the return gate (rc=$rc): $out"
   assert_contains "$out" 'return catch-up is pending' "Bearings refusal did not point to the shared return owner"
 
   # Restart/re-entry is idempotent: no second stop, no duplicate catch-up line,
   # and the same unresolved blocker remains authoritative.
-  set +e
   out=$(run_return "$dir" begin)
   rc=$?
-  set -e
   [ "$rc" -eq 3 ] || fail "repeated begin should preserve the unresolved gate"
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "repeated begin stopped an already-stopped daemon twice"
   wake_count=$(grep -c $'^evidence\twake\t1784074271' "$gate" || true)
@@ -131,7 +132,8 @@ test_return_gate_orders_catchup_before_bearings() {
   [ "$(grep -c $'^evidence\twedge\t' "$gate" || true)" -eq 1 ] || fail "repeated begin duplicated retained wedge evidence"
   [ "$(grep -c $'^evidence\tescalation\t' "$gate" || true)" -eq 1 ] || fail "repeated begin duplicated retained escalation evidence"
 
-  printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' >> "$dir/home/state/repair-task.status"
+  printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' \
+    >> "$dir/home/state/repair-task.status" || fail "the resolving status line could not be appended"
   out=$(run_return "$dir" check) || fail "resolved blocker did not clear return catch-up: $out"
   assert_contains "$out" 'catch-up clear' "successful check did not announce that ordinary work may proceed"
   [ ! -e "$gate" ] || fail "successful check left the return gate behind"
@@ -156,25 +158,24 @@ test_explicit_reclassification_requires_durable_reason() {
     dir="$TMP_ROOT/reclassify-$backend"
     install_runner "$dir"
     seed_live_blocker "$dir" "$backend" vendor-release
-    date +%s > "$dir/home/state/.afk"
-    : > "$dir/home/state/.fake-drain"
-    set +e
+    date +%s > "$dir/home/state/.afk" || fail "$backend away-mode marker could not be written"
+    : > "$dir/home/state/.fake-drain" || fail "$backend empty drain fixture could not be created"
     out=$(run_return "$dir" begin)
     rc=$?
-    set -e
     [ "$rc" -eq 3 ] || fail "$backend blocker did not open the return gate"
 
     # A pause alone cannot mask the keyed blocker. The old concern must be
     # explicitly resolved with the durable reclassification reason first.
-    printf 'paused [key=vendor-release]: waiting for the synthetic vendor window\n' >> "$dir/home/state/repair-task.status"
-    set +e
+    printf 'paused [key=vendor-release]: waiting for the synthetic vendor window\n' \
+      >> "$dir/home/state/repair-task.status" || fail "$backend pause line could not be appended"
     out=$(run_return "$dir" check)
     rc=$?
-    set -e
     [ "$rc" -eq 3 ] || fail "$backend pause silently masked an unresolved blocked key"
 
-    printf 'resolved [key=vendor-release]: reclassified as an external wait because the synthetic vendor owns the next event\n' >> "$dir/home/state/repair-task.status"
-    printf 'paused [key=vendor-release]: waiting for the synthetic vendor window\n' >> "$dir/home/state/repair-task.status"
+    printf 'resolved [key=vendor-release]: reclassified as an external wait because the synthetic vendor owns the next event\n' \
+      >> "$dir/home/state/repair-task.status" || fail "$backend reclassification line could not be appended"
+    printf 'paused [key=vendor-release]: waiting for the synthetic vendor window\n' \
+      >> "$dir/home/state/repair-task.status" || fail "$backend second pause line could not be appended"
     out=$(run_return "$dir" check) || fail "$backend durable reclassification did not clear the return gate: $out"
     [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "$backend reclassification left a gate behind"
   done
@@ -185,14 +186,17 @@ test_captain_decision_does_not_masquerade_as_firstmate_blocker() {
   local dir out
   dir="$TMP_ROOT/captain-decision"
   install_runner "$dir"
-  cat > "$dir/home/state/decision-task.meta" <<'EOF'
+  cat > "$dir/home/state/decision-task.meta" <<'EOF' \
+    || fail "the decision task record could not be written"
 window=synthetic:fm-decision-task
 backend=tmux
 kind=ship
 EOF
-  printf 'needs-decision [key=api-shape]: captain must choose the synthetic API shape\n' > "$dir/home/state/decision-task.status"
-  date +%s > "$dir/home/state/.afk"
-  printf '1784074271\t1\tsignal\tdecision-task.status\tsignal: synthetic decision\n' > "$dir/home/state/.fake-drain"
+  printf 'needs-decision [key=api-shape]: captain must choose the synthetic API shape\n' \
+    > "$dir/home/state/decision-task.status" || fail "the decision status fixture could not be written"
+  date +%s > "$dir/home/state/.afk" || fail "the away-mode marker could not be written"
+  printf '1784074271\t1\tsignal\tdecision-task.status\tsignal: synthetic decision\n' \
+    > "$dir/home/state/.fake-drain" || fail "the decision wake fixture could not be written"
   out=$(run_return "$dir" begin) || fail "approval decision should not be treated as a firstmate blocker: $out"
   assert_contains "$out" 'catch-up wake:' "approval decision notification was not surfaced in catch-up"
   [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "approval decision incorrectly opened a firstmate blocker gate"
@@ -205,14 +209,12 @@ test_evidence_publication_failure_preserves_wake_for_redrain() {
   install_runner "$dir"
   gate="$dir/home/state/.afk-return-catchup"
   printf '1784074271\t7\tsignal\trecovery-task.status\tsignal: recover after output failure\n' \
-    > "$dir/home/state/.fake-drain"
-  : > "$dir/read-only-output"
+    > "$dir/home/state/.fake-drain" || fail "the recovery wake fixture could not be written"
+  : > "$dir/read-only-output" || fail "the read-only output fixture could not be created"
 
-  set +e
   FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
     "$dir/bin/fm-afk-return.sh" begin 3< "$dir/read-only-output" >&3 2> "$dir/failed.err"
   rc=$?
-  set -e
   [ "$rc" -eq 3 ] || fail "evidence publication failure should retain catch-up (rc=$rc)"
   [ -s "$dir/home/state/.fake-drain" ] || fail "publication failure removed the unhandled durable wake"
   [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "publication failure acknowledged the wake before delivery"
@@ -238,12 +240,12 @@ test_evidence_publication_failure_preserves_wake_for_redrain() {
 test_away_reentry_refuses_pending_return_gate() {
   local dir out rc
   dir="$TMP_ROOT/reentry"
-  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config"
-  printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$dir/home/state/.afk-return-catchup"
-  set +e
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" \
+    || fail "the re-entry case directories could not be created"
+  printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$dir/home/state/.afk-return-catchup" \
+    || fail "the pending return gate fixture could not be written"
   out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$ROOT/bin/fm-afk-launch.sh" start-native 2>&1)
   rc=$?
-  set -e
   [ "$rc" -ne 0 ] || fail "away re-entry succeeded while return catch-up was pending"
   assert_contains "$out" 'return catch-up is still pending' "away re-entry refusal did not explain the pending owner"
   [ ! -e "$dir/home/state/.afk" ] || fail "away re-entry wrote .afk despite the pending return gate"
@@ -255,14 +257,14 @@ test_check_retries_recorded_terminal_teardown() {
   dir="$TMP_ROOT/terminal-teardown"
   install_runner "$dir"
   gate="$dir/home/state/.afk-return-catchup"
-  date +%s > "$dir/home/state/.afk"
-  printf 'herdr\tsynthetic:pane\tsynthetic-workspace\n' > "$dir/home/state/.afk-daemon-terminal"
-  touch "$dir/home/state/.fail-terminal-stop-once"
+  date +%s > "$dir/home/state/.afk" || fail "the away-mode marker could not be written"
+  printf 'herdr\tsynthetic:pane\tsynthetic-workspace\n' > "$dir/home/state/.afk-daemon-terminal" \
+    || fail "the terminal teardown record could not be written"
+  touch "$dir/home/state/.fail-terminal-stop-once" \
+    || fail "the one-shot teardown failure marker could not be created"
 
-  set +e
   out=$(run_return "$dir" begin)
   rc=$?
-  set -e
   [ "$rc" -eq 3 ] || fail "failed terminal teardown should keep return catch-up gated (rc=$rc): $out"
   [ -e "$gate" ] || fail "failed terminal teardown cleared the return gate"
   [ -e "$dir/home/state/.afk-daemon-terminal" ] || fail "failed terminal teardown discarded its durable record"

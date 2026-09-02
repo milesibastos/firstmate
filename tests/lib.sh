@@ -88,7 +88,6 @@ pass() {
 # abort for a silent skip. tests/fm-remote-job.test.sh is the worked example.
 FM_TEST_ERREXIT_LEAK_ALLOWLIST="
 fm-afk-pi-herdr-return-e2e.test.sh:unmeasured
-fm-afk-return.test.sh:6
 fm-backend-orca.test.sh:15
 fm-backlog-handoff.test.sh:15
 fm-bearings-board.test.sh:8
@@ -103,14 +102,11 @@ fm-remote-reply.test.sh:unmeasured
 fm-remote-secondmate-lifecycle-e2e.test.sh:unmeasured
 fm-secondmate-reconcile.test.sh:10
 fm-secondmate-safety.test.sh:24
-fm-startup-memory-budget.test.sh:3
-fm-stow-cascade.test.sh:6
 fm-teardown-endpoint-safety.test.sh:7
 fm-teardown.test.sh:58
 fm-test-isolation-proof.test.sh:8
 fm-test-run.test.sh:20
 fm-voice-relay.test.sh:37
-fm-wake-queue.test.sh:5
 "
 
 # fm_test_errexit_leak_allowlisted <suite-basename>: true while that suite is

@@ -72,17 +72,21 @@ chmod +x "$FAKEBIN/tmux"
 new_home() {
   local name=$1 budget=${2:-10} home
   home="$TMP_ROOT/homes/$name"
-  mkdir -p "$home/config" "$home/data" "$home/state" "$home/bin" "$home/projects"
-  printf '%s\n' "$name" > "$home/.fm-secondmate-home"
-  printf '%s\n' '# secondmate instructions' > "$home/AGENTS.md"
-  printf '%s\n' "$budget" > "$home/config/startup-memory-budget"
+  mkdir -p "$home/config" "$home/data" "$home/state" "$home/bin" "$home/projects" \
+    || fail "secondmate home $name could not be created"
+  printf '%s\n' "$name" > "$home/.fm-secondmate-home" \
+    || fail "secondmate home $name marker could not be written"
+  printf '%s\n' '# secondmate instructions' > "$home/AGENTS.md" \
+    || fail "secondmate home $name instructions could not be written"
+  printf '%s\n' "$budget" > "$home/config/startup-memory-budget" \
+    || fail "secondmate home $name budget could not be written"
   printf '%s\n' "$home"
 }
 
 new_primary() {
   local name=$1 home
   home="$TMP_ROOT/primaries/$name"
-  mkdir -p "$home/config" "$home/data" "$home/state"
+  mkdir -p "$home/config" "$home/data" "$home/state" || fail "primary home $name could not be created"
   printf '%s\n' "$home"
 }
 
@@ -124,22 +128,22 @@ value_in() { # <stanza> <key>
 
 test_budget_is_enforced_per_home_and_never_summed() {
   local primary a b out sa sb
-  primary=$(new_primary per-home)
-  a=$(new_home over-budget 10)
-  b=$(new_home within-budget 10)
+  primary=$(new_primary per-home) || fail "the per-home fixture could not be built"
+  a=$(new_home over-budget 10) || fail "the over-budget fixture could not be built"
+  b=$(new_home within-budget 10) || fail "the within-budget fixture could not be built"
   # Home A alone exceeds its own 10-token allowance.
-  printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$a/data/captain.md"
+  printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$a/data/captain.md" \
+    || fail "the over-budget memory fixture could not be written"
   # Home B is comfortably inside the same allowance, and would only look
   # over-budget if the cascade added another home's total to its own.
-  printf '%s\n' 'bbbbbb' > "$b/data/captain.md"
+  printf '%s\n' 'bbbbbb' > "$b/data/captain.md" \
+    || fail "the within-budget memory fixture could not be written"
   {
     local_record over-budget "$a"
     local_record within-budget "$b"
-  } > "$primary/data/secondmates.md"
+  } > "$primary/data/secondmates.md" || fail "the secondmate registry could not be written"
 
-  set +e
   out=$(run_cascade "$primary")
-  set -e
   sa=$(stanza "$out" over-budget)
   sb=$(stanza "$out" within-budget)
 
@@ -162,23 +166,23 @@ test_budget_is_enforced_per_home_and_never_summed() {
 
 test_every_registered_home_is_enumerated_exactly_once() {
   local primary a b c out count dup rc
-  primary=$(new_primary enumerate)
-  a=$(new_home enum-a)
-  b=$(new_home enum-b)
-  c=$(new_home enum-c)
+  primary=$(new_primary enumerate) || fail "the enumerate fixture could not be built"
+  a=$(new_home enum-a) || fail "the enum-a fixture could not be built"
+  b=$(new_home enum-b) || fail "the enum-b fixture could not be built"
+  c=$(new_home enum-c) || fail "the enum-c fixture could not be built"
   {
     local_record enum-a "$a"
     local_record enum-b "$b"
     local_record enum-c "$c"
-  } > "$primary/data/secondmates.md"
+  } > "$primary/data/secondmates.md" || fail "the secondmate registry could not be written"
   # Two live endpoint records naming the same home must not multiply its stanza:
   # the registry, not the endpoint inventory, is the enumeration source.
-  fm_write_secondmate_meta "$primary/state/enum-a.meta" "$a"
-  fm_write_secondmate_meta "$primary/state/enum-a-stale.meta" "$a"
+  fm_write_secondmate_meta "$primary/state/enum-a.meta" "$a" \
+    || fail "the endpoint record could not be written"
+  fm_write_secondmate_meta "$primary/state/enum-a-stale.meta" "$a" \
+    || fail "the endpoint record could not be written"
 
-  set +e
   out=$(run_cascade "$primary")
-  set -e
   count=$(printf '%s\n' "$out" | grep -c '^secondmate=')
   [ "$count" -eq 3 ] || fail "expected one stanza per registered home, got $count"
   [ "$(printf '%s\n' "$out" | grep -c '^secondmate=enum-a$')" -eq 1 ] \
@@ -186,15 +190,13 @@ test_every_registered_home_is_enumerated_exactly_once() {
   [ "$(printf '%s\n' "$out" | sed -n 's/^secondmates=//p')" = 3 ] \
     || fail "the cascade total did not match the registered homes"
 
-  dup=$(new_primary enumerate-dup)
+  dup=$(new_primary enumerate-dup) || fail "the enumerate-dup fixture could not be built"
   {
     local_record enum-a "$a"
     local_record enum-other "$a"
-  } > "$dup/data/secondmates.md"
-  set +e
+  } > "$dup/data/secondmates.md" || fail "the double-counting registry could not be written"
   out=$(run_cascade "$dup" 2>&1)
   rc=$?
-  set -e
   expect_code 1 "$rc" "a registry that double-counts a home should refuse the cascade"
   assert_contains "$out" 'duplicate secondmate home assignment' \
     "the double-counted home was not named"
@@ -203,26 +205,27 @@ test_every_registered_home_is_enumerated_exactly_once() {
 
 test_transport_routes_by_placement_and_liveness() {
   local primary live idle remote out s
-  primary=$(new_primary transport)
-  live=$(new_home live-local)
-  idle=$(new_home idle-local)
+  primary=$(new_primary transport) || fail "the transport fixture could not be built"
+  live=$(new_home live-local) || fail "the live-local fixture could not be built"
+  idle=$(new_home idle-local) || fail "the idle-local fixture could not be built"
   remote="$TMP_ROOT/homes/remote-home"
   {
     local_record live-local "$live"
     local_record idle-local "$idle"
     remote_record remote-live remote-mac "$TMP_ROOT/remote-root" "$remote"
-  } > "$primary/data/secondmates.md"
-  fm_write_secondmate_meta "$primary/state/live-local.meta" "$live" 'firstmate:fm-live-local' alpha claude
-  fm_write_secondmate_meta "$primary/state/remote-live.meta" "$remote" 'fm-remote:fm-remote-live' alpha claude
+  } > "$primary/data/secondmates.md" || fail "the secondmate registry could not be written"
+  fm_write_secondmate_meta "$primary/state/live-local.meta" "$live" 'firstmate:fm-live-local' alpha claude \
+    || fail "the endpoint record could not be written"
+  fm_write_secondmate_meta "$primary/state/remote-live.meta" "$remote" 'fm-remote:fm-remote-live' alpha claude \
+    || fail "the endpoint record could not be written"
   printf 'role=secondmate\neffective_budget_tokens=7500\ntotal_estimated_tokens=100\nbudget_status=within-budget\n' \
-    > "$TMP_ROOT/remote-budget.txt"
+    > "$TMP_ROOT/remote-budget.txt" \
+    || fail "the fake remote accounting fixture could not be written"
 
-  set +e
   out=$(run_cascade "$primary" \
     FM_FAKE_TMUX_WINDOW='fm-live-local' \
     FM_FAKE_REMOTE_BUDGET="$TMP_ROOT/remote-budget.txt" \
     FM_FAKE_REMOTE_AGENT_STATE=alive)
-  set -e
   [ "$(value_in "$(stanza "$out" live-local)" transport)" = agent ] \
     || fail "a local home with a live agent was not routed to that agent"
   [ "$(value_in "$(stanza "$out" idle-local)" placement)" = local ] \
@@ -237,12 +240,10 @@ test_transport_routes_by_placement_and_liveness() {
   [ "$(value_in "$s" total_estimated_tokens)" = 100 ] \
     || fail "the remote home's own accounting was not reported"
 
-  set +e
   out=$(run_cascade "$primary" \
     FM_FAKE_TMUX_WINDOW='fm-live-local' \
     FM_FAKE_REMOTE_BUDGET="$TMP_ROOT/remote-budget.txt" \
     FM_FAKE_REMOTE_AGENT_STATE=dead)
-  set -e
   s=$(stanza "$out" remote-live)
   [ "$(value_in "$s" transport)" = deferred ] \
     || fail "a remote home with no live agent was not deferred: $(value_in "$s" transport)"
@@ -253,15 +254,16 @@ test_transport_routes_by_placement_and_liveness() {
 
 test_receipt_facts_are_complete_and_show_before_and_after() {
   local primary home before after s
-  primary=$(new_primary receipt)
-  home=$(new_home receipt-home 20)
-  printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$home/data/captain.md"
-  printf '%s\n' 'bbbbbb' > "$home/data/learnings.md"
-  local_record receipt-home "$home" > "$primary/data/secondmates.md"
+  primary=$(new_primary receipt) || fail "the receipt fixture could not be built"
+  home=$(new_home receipt-home 20) || fail "the receipt-home fixture could not be built"
+  printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$home/data/captain.md" \
+    || fail "the receipt captain memory fixture could not be written"
+  printf '%s\n' 'bbbbbb' > "$home/data/learnings.md" \
+    || fail "the receipt learnings fixture could not be written"
+  local_record receipt-home "$home" > "$primary/data/secondmates.md" \
+    || fail "the receipt registry could not be written"
 
-  set +e
   before=$(run_cascade "$primary")
-  set -e
   s=$(stanza "$before" receipt-home)
   [ "$(value_in "$s" placement)" = local ] || fail "receipt stanza lacks placement"
   [ "$(value_in "$s" home)" = "$home" ] || fail "receipt stanza lacks the home it accounted"
@@ -276,10 +278,9 @@ test_receipt_facts_are_complete_and_show_before_and_after() {
 
   # Curation shrinks this home's editable memory; the same command is the
   # after-pass, so before and after totals come from one accounting contract.
-  printf '%s\n' 'aaa' > "$home/data/captain.md"
-  set +e
+  printf '%s\n' 'aaa' > "$home/data/captain.md" \
+    || fail "the curated captain memory fixture could not be written"
   after=$(run_cascade "$primary")
-  set -e
   s=$(stanza "$after" receipt-home)
   [ "$(value_in "$s" budget_status)" = within-budget ] \
     || fail "the after pass did not reflect this home's curation"
@@ -291,25 +292,26 @@ test_receipt_facts_are_complete_and_show_before_and_after() {
 
 test_a_slow_remote_is_bounded_and_the_rest_still_report() {
   local primary home remote out rc started elapsed s
-  primary=$(new_primary bounded)
-  home=$(new_home bounded-local 10)
-  printf '%s\n' 'cccccc' > "$home/data/captain.md"
+  primary=$(new_primary bounded) || fail "the bounded fixture could not be built"
+  home=$(new_home bounded-local 10) || fail "the bounded-local fixture could not be built"
+  printf '%s\n' 'cccccc' > "$home/data/captain.md" \
+    || fail "the bounded-home memory fixture could not be written"
   remote="$TMP_ROOT/homes/bounded-remote"
   {
     remote_record bounded-remote remote-mac "$TMP_ROOT/remote-root" "$remote"
     local_record bounded-local "$home"
-  } > "$primary/data/secondmates.md"
-  fm_write_secondmate_meta "$primary/state/bounded-remote.meta" "$remote" 'fm-remote:fm-bounded-remote'
-  printf 'role=secondmate\n' > "$TMP_ROOT/remote-budget.txt"
+  } > "$primary/data/secondmates.md" || fail "the secondmate registry could not be written"
+  fm_write_secondmate_meta "$primary/state/bounded-remote.meta" "$remote" 'fm-remote:fm-bounded-remote' \
+    || fail "the endpoint record could not be written"
+  printf 'role=secondmate\n' > "$TMP_ROOT/remote-budget.txt" \
+    || fail "the truncated remote accounting fixture could not be written"
 
-  started=$(date +%s)
-  set +e
+  started=$(date +%s) || fail "the bounded-sweep start time could not be read"
   out=$(run_cascade "$primary" \
     FM_STOW_CASCADE_TIMEOUT=2 \
     FM_FAKE_SSH_MODE=hang \
     FM_FAKE_REMOTE_BUDGET="$TMP_ROOT/remote-budget.txt")
   rc=$?
-  set -e
   elapsed=$(( $(date +%s) - started ))
   [ "$elapsed" -lt 30 ] || fail "the sweep waited $elapsed s on a host that never answered"
   s=$(stanza "$out" bounded-remote)
@@ -325,12 +327,10 @@ test_a_slow_remote_is_bounded_and_the_rest_still_report() {
   expect_code 3 "$rc" "a reported per-home exception should be distinguishable from a clean sweep"
   assert_contains "$out" 'exceptions=1' "the sweep did not count the unreachable home"
 
-  set +e
   out=$(run_cascade "$primary" \
     FM_FAKE_SSH_MODE=unreachable \
     FM_FAKE_REMOTE_BUDGET="$TMP_ROOT/remote-budget.txt")
   rc=$?
-  set -e
   [ "$(value_in "$(stanza "$out" bounded-remote)" budget_report)" = error ] \
     || fail "an unreachable host was not reported as a per-home exception"
   [ "$(value_in "$(stanza "$out" bounded-local)" budget_report)" = ok ] \
@@ -341,21 +341,18 @@ test_a_slow_remote_is_bounded_and_the_rest_still_report() {
 
 test_no_cascade_without_secondmates_or_from_a_secondmate_home() {
   local primary secondmate out rc
-  primary=$(new_primary quiet)
-  set +e
+  primary=$(new_primary quiet) || fail "the quiet fixture could not be built"
   out=$(run_cascade "$primary")
   rc=$?
-  set -e
   expect_code 0 "$rc" "a home with no registered secondmates should be a clean no-op"
   assert_contains "$out" 'secondmates=0' "an empty cascade did not say so"
   assert_not_contains "$out" 'secondmate=' "an empty cascade invented a home"
 
-  secondmate=$(new_home quiet-secondmate)
-  local_record quiet-secondmate "$secondmate" > "$secondmate/data/secondmates.md"
-  set +e
+  secondmate=$(new_home quiet-secondmate) || fail "the quiet-secondmate fixture could not be built"
+  local_record quiet-secondmate "$secondmate" > "$secondmate/data/secondmates.md" \
+    || fail "the secondmate-home registry could not be written"
   out=$(run_cascade "$secondmate")
   rc=$?
-  set -e
   expect_code 0 "$rc" "a secondmate home should not fail its own stow"
   assert_contains "$out" 'role=secondmate' "a secondmate home was not recognized"
   assert_contains "$out" 'secondmates=0' "a secondmate home cascaded to its own registry"
