@@ -1,0 +1,8 @@
+== BEFORE FIX (base commit 456e768d lib swapped in) ==
+ok - inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell
+ok - inbox: the idempotent enqueue dedups an exact re-run onto the same record, handled or not
+ok - inbox: idempotent enqueue follows a record concurrently moved to handled
+ok - inbox: the handled mv is the idempotent ack and sequences are never reissued
+ok - inbox: concurrent writers serialize on the sequence lock and lose nothing
+not ok - a writer that lost the sequence-lock creation race dropped its steer
+EXIT:1
