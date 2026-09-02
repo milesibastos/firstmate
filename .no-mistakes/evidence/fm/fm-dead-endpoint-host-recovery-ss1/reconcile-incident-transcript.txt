@@ -1,0 +1,56 @@
+
+=== task t1's fleet session is created (four ordinary workers -> one, for this repro) ===
+fmses:1: fm-t1* (1 panes) [80x24] 
+
+=== agent state before the incident ===
+fm_backend_agent_state tmux fmses:fm-t1 settled to 'ambiguous' before the incident (a brand-new pane briefly reads 'ambiguous' while login/prompt-init subprocesses run; the classifier settles once they exit)
+
+=== INCIDENT: the terminal session hosting the fleet dies ===
+server pid 82319 confirmed gone
+no server running on /private/tmp/tmux-502/fm-e2e-reconcile-82266
+worktree survives: ## task-t1
+
+=== 1/3 circular refusal: fm-control.sh t1 exit ===
+error: task t1's recorded endpoint is gone, so there is no agent to stop; rebuild it with 'bin/fm-control.sh t1 reconcile' before any further control action
+exit code: 1
+
+=== 2/3 circular refusal: fm-control.sh t1 relaunch ===
+error: task t1's recorded endpoint is gone, so there is no agent to stop; rebuild it with 'bin/fm-control.sh t1 reconcile' before any further control action
+error: relaunch of t1 failed while stopping the old agent and its state is 'missing'; the durable record and progress note were retained for recovery
+exit code: 1
+
+=== 3/3 circular refusal: fm-spawn.sh t1 --relaunch ===
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no watcher has a fresh beacon (last beat: never, grace 300s).
+●  Trust the emitted supervision protocol for this harness; do not use shell & for watcher repair.
+●  This is a supervision warning only; the guarded operation WILL still run.
+●  watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+error: task t1's endpoint reads 'missing'; a relaunch requires a positively agent-free endpoint, and there is no agent to stop. Rebuild the endpoint first with bin/fm-control.sh t1 reconcile
+exit code: 1
+
+=== SAFETY CASE: the label is still alive under a different session name ===
+error: task t1's recorded endpoint fmses:fm-t1 is gone, but its label fm-t1 is still live at: renamed-fleet:fm-t1; that is the same task under a different name, not a lost one, so rebuilding would put a second agent on /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-e2e-reconcile.Y1adGZ/wt-t1. Address the endpoint that exists
+exit code: 1 (expected: 1, refuses, names where the endpoint actually is)
+inventory after the refused reconcile (must show nothing created for fmses):
+renamed-fleet:1: fm-t1* (1 panes) [80x24] 
+
+=== FIX: fm-control.sh t1 reconcile ===
+reconciled t1 backend=tmux endpoint=fmses:fm-t1 worktree=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-e2e-reconcile.Y1adGZ/wt-t1 agent=none worktree-holders=none
+next: bin/fm-control.sh t1 relaunch --note '<what happened and where the work stands>'
+exit code: 0
+
+=== endpoint state after reconcile ===
+fmses:1:  01M1H3EEYD6QJP6C888ZZWDD8B* (1 panes) [80x24] 
+fmses:2: fm-t1 (1 panes) [80x24] 
+pane cwd = /private/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/fm-e2e-reconcile.Y1adGZ/wt-t1
+recorded worktree = /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-e2e-reconcile.Y1adGZ/wt-t1
+
+=== AFTER FIX: fm-spawn.sh t1 --relaunch no longer says 'stop the agent first' ===
+WARNING: watcher still down (same stale episode; last beat: never, grace 300s) - full banner already printed this episode.
+error: unknown harness 'fm-e2e-probe-nonexistent-harness'; pass a raw launch command to use an unverified adapter
+exit code: 1
+(expected: past the endpoint-state guard entirely, refusing instead on the unrecognized harness name -- proof the circular refusal is gone)
+
+=== transcript complete ===
