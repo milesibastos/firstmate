@@ -1,0 +1,27 @@
+# Behavioral verification of tests/fm-remote-job.test.sh guarded setup writes
+# Commit under test: 0a3bac3ca4e71df7a9d513c3be22f544fe45e68c
+# Method: exercise the exact shell idiom the diff introduced, against the
+# real fail()/pass() reporters sourced from tests/lib.sh, with a write
+# target made unwritable so the printf/heredoc redirection itself fails.
+
+=== BEFORE the fix's idiom: an unguarded write (old fm-remote-job.test.sh style) ===
+=== fails the redirection but the suite never calls fail() or prints 'not ok' ===
+/tmp/verify_before_ev_98457.sh: line 5: /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/tmp.zrH6cyWmZd/worker.lock/pid: No such file or directory
+unguarded write rc=1 -- script continued past a failed write with NO fail() call, NO 'not ok' line
+
+=== AFTER the fix's idiom: the same write guarded with '|| fail "..."' ===
+=== (the exact pattern added at tests/fm-remote-job.test.sh:604-613,627-629,735,743) ===
+--- printf guard (line-604 pattern) on an unwritable target ---
+/tmp/verify_after_ev_98457.sh: line 7: /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/tmp.lJwdqWXA9Q/worker.lock/pid: No such file or directory
+not ok - setup: could not record the quarantine owner pid
+exit code: 1
+
+--- heredoc guard (line-743 pattern) on an unwritable target ---
+/tmp/verify_after_ev_98457.sh: line 16: /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/tmp.81pPpSdXld/nonexistent-subdir/fm-remote-job-worker.sh: No such file or directory
+not ok - setup: could not write the restart worker fixture
+exit code: 1
+
+--- same printf guard on a writable target (no false positive) ---
+exit code: 0 (expect 0)
+12345
+=== end of transcript ===
