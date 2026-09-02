@@ -86,6 +86,16 @@ pass() {
 # names the step that broke instead of surfacing as a confusing assertion
 # further down. Dropping the pairs without that second half trades a silent
 # abort for a silent skip. tests/fm-remote-job.test.sh is the worked example.
+#
+# A setup step that is a function called inside a command substitution
+# (`x=$(helper)`) needs its own internal `|| fail` first: `fail`'s `exit` only
+# ends that subshell, so the function's exit status is whatever its last
+# command left, and a caller's `|| fail` on the assignment cannot fire unless
+# the function's own last command reflects the failure. Add the check inside
+# the function, then keep the caller's check so a signalled failure actually
+# stops the test instead of continuing against a fixture that was never built.
+# `fm_fakebin` and tests/wake-helpers.sh's `make_case`/`make_fake_crew_state`
+# are the worked examples for that shape.
 FM_TEST_ERREXIT_LEAK_ALLOWLIST="
 fm-afk-pi-herdr-return-e2e.test.sh:unmeasured
 fm-backend-orca.test.sh:15
