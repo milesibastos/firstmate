@@ -118,7 +118,7 @@ Check it against any green run's own artifacts:
 
 ```sh
 gh run download <run-id> -R milesibastos/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
-jq -r '[.scripts[].duration_ms]|add/60000' /tmp/fm-serial/*.json
+for f in /tmp/fm-serial/*/*.json; do printf '%s %s min\n' "$(basename "$f" .json | sed 's/fm-test-timing-portable-//')" "$(jq -r '[.scripts[].duration_ms]|add/60000|.*10|round/10' "$f")"; done
 ```
 
 The two numbers here are deliberately different, and the gap between them is the point.
@@ -140,7 +140,7 @@ Refresh the hints by downloading the per-shard timing artifacts from a green CI 
 
 ```sh
 gh run download <run-id> -R milesibastos/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
-jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*.json | LC_ALL=C sort
+jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*/*.json | LC_ALL=C sort
 bin/fm-test-run.sh --check-coverage
 ```
 
