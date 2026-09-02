@@ -63,6 +63,11 @@
 #     own group, so a group id seen from here belongs to one child, and a group
 #     id from anywhere else belongs to something the caller did not create.
 #
+# This header owns that rule. bin/fm-brief.sh's generated crewmate contract
+# carries one short reinforcement of it, because the scratch code that breaks it
+# is written before any library is opened; change the rule here first, then that
+# reinforcement.
+#
 # WHY THE ROOT MUST BE A CHILD, NOT $$. Walking from your own pid looks more
 # convenient and is a trap: the `ps` and `awk` that perform the walk are
 # themselves your descendants, so they land in their own result. The count then

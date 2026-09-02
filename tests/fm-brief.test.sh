@@ -762,6 +762,43 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The ship and scout scaffolds must carry the process-signalling rule, because a
+# throwaway reproduction script is scratch code that no review, lint, or library
+# ever sees; the brief is the only thing that reaches it. bin/fm-cancel-lib.sh's
+# header owns the rule in full, so the brief must also point at that owner rather
+# than becoming a second copy that drifts. A secondmate charter is excluded: it
+# supervises a home rather than writing reproduction code.
+test_crewmate_scaffolds_carry_the_signalling_rule() {
+  local home brief
+  home="$TMP_ROOT/signal-rule-home"
+  mkdir -p "$home/data"
+  for spec in "brief-signal-e1:--mode no-mistakes" "brief-signal-e2:--mode direct-PR" "brief-signal-e3:--scout"; do
+    # shellcheck disable=SC2086  # the flag list is an intentional word-split arg list
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "${spec%%:*}" some-proj ${spec#*:} >/dev/null 2>&1 \
+      || fail "${spec%%:*}: scaffold exited non-zero"
+    brief="$home/data/${spec%%:*}/brief.md"
+    assert_grep "Stop or clean up only processes you started and still hold a handle to" "$brief" \
+      "${spec%%:*}: brief lost the started-and-held signalling rule"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the recorded pid must render literally
+    assert_grep 'a recorded $!' "$brief" \
+      "${spec%%:*}: brief must name the recorded pid as the proof of ownership"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'Never select a process by pattern (`pgrep -f`, `ps | grep`)' "$brief" \
+      "${spec%%:*}: brief lost the pattern-matching prohibition"
+    assert_grep "never signal a process group you did not create" "$brief" \
+      "${spec%%:*}: brief lost the process-group prohibition"
+    assert_grep "\`$ROOT/bin/fm-cancel-lib.sh\`'s header" "$brief" \
+      "${spec%%:*}: brief must point at the rule's owner by absolute path"
+  done
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-signal-e4 --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate charter scaffold exited non-zero"
+  assert_no_grep "Stop or clean up only processes you started" "$home/data/brief-signal-e4/brief.md" \
+    "the signalling rule leaked into a secondmate charter"
+  pass "fm-brief.sh: ship and scout briefs carry the signalling rule and point at its owner"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -783,3 +820,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_crewmate_scaffolds_carry_the_signalling_rule

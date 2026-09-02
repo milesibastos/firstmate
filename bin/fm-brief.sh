@@ -57,6 +57,8 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Ship and scout scaffolds also carry the process-signalling rule as a rule-block
+# paragraph; bin/fm-cancel-lib.sh's header owns that rule and this is its one reinforcement.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -196,6 +198,19 @@ When a terminal message says an instruction is waiting there - and at any natura
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
+
+# The signalling rule for ship and scout scaffolds; a secondmate charter supervises
+# a home rather than writing reproduction code and does not carry it.
+# bin/fm-cancel-lib.sh's header owns the rule and its reasoning; this is the one
+# reinforcement, so keep it imperative and do not grow it into a second copy.
+IFS= read -r -d '' SIGNAL_RULE <<EOF || true
+8. Stop or clean up only processes you started and still hold a handle to (a recorded \$!),
+   signalling each pid individually. Never select a process by pattern (\`pgrep -f\`, \`ps | grep\`)
+   and never signal a process group you did not create - this machine runs other lanes' agents,
+   and a throwaway reproduction script doing that has killed one. The full rule, and a library
+   that implements it for trees you started, are owned by \`$FM_ROOT/bin/fm-cancel-lib.sh\`'s header.
+EOF
+SIGNAL_RULE=${SIGNAL_RULE%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -358,6 +373,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$SIGNAL_RULE
 
 $INBOX_SECTION
 
@@ -437,6 +453,7 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+$SIGNAL_RULE
 
 $INBOX_SECTION
 
