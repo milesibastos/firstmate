@@ -1171,6 +1171,41 @@ SH
   chmod +x "$bindir/ps"
 }
 
+test_lock_steal_escalation_is_bounded() {
+  local dir state lockdir out rc
+  dir=$(make_case lock-steal-depth)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  # A stale lock whose owner is gone, so acquisition takes the steal path.
+  mkdir "$lockdir"
+  printf '%s\n' "$(dead_pid)" > "$lockdir/pid"
+  # ...in a directory that cannot be written. Every level then fails to create
+  # its own lock and escalates again, which is what made this recursion
+  # unbounded: it appends another ".steal" until bash dies on its own stack.
+  chmod a-w "$state" 2>/dev/null || {
+    pass "steal-escalation bound skipped where the directory stays writable"
+    return
+  }
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    exit $?
+  ' _ "$LIB" "$lockdir" 2>&1)
+  rc=$?
+  # Restore before asserting, so a failure cannot leave an unwritable fixture.
+  chmod u+w "$state" 2>/dev/null || true
+
+  [ "$rc" -lt 128 ] \
+    || fail "unacquirable lock killed the shell by signal (exit $rc) instead of refusing"
+  [ "$rc" -ne 0 ] \
+    || fail "an unwritable lock directory reported a successful acquisition"
+  case "$out" in
+    *"maximum function nesting"*)
+      fail "steal escalation is still unbounded: it exhausted bash's function nesting" ;;
+  esac
+  pass "steal escalation refuses at a bounded depth instead of crashing the shell"
+}
+
 test_lock_exec_replaced_holder_still_holds() {
   local dir state lockdir holder lockpid recorded current out i
   dir=$(make_case lock-exec-replaced)
@@ -1459,6 +1494,7 @@ test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_does_not_steal_live_lock
 test_lock_records_holder_identity
 test_lock_exec_replaced_holder_still_holds
+test_lock_steal_escalation_is_bounded
 test_lock_live_holder_is_not_stolen_when_idle
 test_lock_recycled_pid_does_not_read_as_holder
 test_lock_stale_record_with_identity_and_no_process_is_reclaimed

@@ -950,8 +950,27 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# The reclaim escalation is bounded. fm_lock_try_acquire below recurses into
+# "<lock>.steal" to serialize a stale-owner reclaim, and that steal mutex can
+# itself go stale, so the escalation is genuinely recursive rather than one
+# level deep. Unbounded, it is a crash: when the lock directory cannot be
+# written, every level fails to create its lock and escalates again, appending
+# another ".steal" forever until bash dies on its own stack (reproduced with
+# FUNCNEST, and observed in the wild as "Segmentation fault (core dumped)" plus
+# a multi-minute stall). A bash that dies mid-critical-section runs no cleanup,
+# so callers leak whatever they were holding.
+#
+# A real reclaim needs one or two levels; this ceiling is far above that and far
+# below any stack limit. Reaching it means the escalation is not converging, and
+# refusing there returns an ordinary "cannot acquire" that every caller already
+# handles, instead of taking the process down.
+FM_LOCK_MAX_STEAL_DEPTH=${FM_LOCK_MAX_STEAL_DEPTH:-8}
+
+# fm_lock_try_acquire <lockdir> [steal-depth]
+# The second argument is internal: it counts how many ".steal" escalations deep
+# this attempt already is. Callers pass one argument.
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 depth=${2:-0} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -990,8 +1009,19 @@ fm_lock_try_acquire() {
     return 1
   fi
 
+  case "$depth" in
+    ''|*[!0-9]*) depth=0 ;;
+  esac
+  if [ "$depth" -ge "$FM_LOCK_MAX_STEAL_DEPTH" ]; then
+    # Not converging. Report the holder we saw and let the caller retry rather
+    # than escalating into another level of recursion.
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire "$steal" "$((depth + 1))"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     fm_lock_holder_is_current "$lockdir" "$FM_LOCK_HELD_PID" || true
