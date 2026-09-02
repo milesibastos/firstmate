@@ -1,0 +1,17 @@
+# Mutation A: fm_identity_holder_is_current made too-strict (whole-identity equality only).
+# Expected: the new real-exec case FAILS with rc=1 proof=mismatch proves=no; after restoring, it PASSES.
+
+## invocations left in tests/fm-watcher-lock.test.sh: test_identity_survives_the_recorded_process_exec 
+
+## mutation applied (git diff bin/fm-wake-lib.sh):
++  FM_IDENTITY_PROOF=mismatch; return 1   # MUTATION A: too-strict
+
+## run with mutation:
+not ok - a process that exec'd after its identity was recorded was no longer proved: rc=1 proof=mismatch proves=no
+exit=
+
+## run after restoring bin/fm-wake-lib.sh (same single case):
+ok - a recorded identity still proves the process after it replaces its command
+exit=
+
+## worktree after restore: 0 modified files

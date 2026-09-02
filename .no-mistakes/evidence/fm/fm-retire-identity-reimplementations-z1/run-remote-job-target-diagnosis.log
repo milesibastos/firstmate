@@ -1,0 +1,9 @@
+ok - default queue and execution bounds independently cover long polls
+ok - operator PATH excludes a symlinked local bin
+ok - operator PATH honors nvm defaults with a deterministic fallback
+ok - operator PATH resolves the authorized Nix profile bin link
+ok - operator PATH orders discovered tool installs deterministically
+ok - the worker preserves bounded argv and stdin in an empty environment
+ok - active jobs keep the worker ready for concurrent requests
+not ok - remote job worker did not report ready after startup
+EXIT=1

@@ -1,0 +1,97 @@
+FM_TEST_BEGIN 2026-09-02T14:03:32Z tests/fm-watcher-lock.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - simultaneous watcher starts leave exactly one live process
+ok - fm_pid_identity real ps fallback is locale-invariant
+ok - fm_pid_identity is locale-invariant across LC_ALL/LC_TIME
+ok - /proc process identity ignores simulated btime changes
+ok - /proc process identity detects pid reuse
+ok - MSYS /proc process identity regression skipped on non-Windows host
+ok - killed watcher stale lock is reclaimed
+tests/fm-watcher-lock.test.sh: line 1044: 97266 Killed: 9                  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_remove_path() {
+      if [ "$1" = "$STATE/.watch.lock" ]; then
+        kill -KILL "${BASHPID:-$$}"
+      fi
+      return 1
+    }
+    fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" > /dev/null 2>&1
+ok - stale watcher reclaim publishes durable recovery evidence before clear
+ok - live watcher lock with stale heartbeat is actionable
+ok - guard banner leads when down with pending wakes (repair-after-drain) and stays silent when live and fresh
+ok - concurrent fm_lock_try_acquire yields exactly one winner
+ok - dead-pid stale lock is reclaimed by a single acquirer
+ok - concurrent stale-lock steal yields exactly one winner
+ok - live steal mutex is not reclaimed
+ok - live-held lock is not stolen
+ok - lock acquisition records the holder's identity, not just its pid
+ok - a holder whose shell is replaced by its last command still holds its lock
+ok - steal escalation refuses at a bounded depth instead of crashing the shell
+ok - a live holder that has been idle for a long time is still the holder
+ok - a recycled pid does not read as the lock holder
+ok - a recorded identity's key label alone does not veto a live holder with the same start time
+ok - a recorded holder with no process left is reclaimed
+ok - the shared identity predicate separates not-disproved from proved
+ok - a recorded identity still proves the process after it replaces its command
+ok - an identity that cannot be re-proved keeps the lock with the holder
+ok - a lock with no recorded identity is never stolen, and says so
+ok - empty mid-acquire lock keeps a minimum grace
+ok - late original claimant cannot claim a recreated lock
+ok - paused mid-acquire claimant backs off to active stealer
+ok - watch restart preserves recovery without signaling a reused pid
+ok - watch restart attaches to a verified healthy peer and later surfaces a successor gap
+ok - watcher self-evicts when the lock pid no longer names it
+ok - arm turns clean self-eviction without a successor into a typed failure
+ok - arm attaches to a live fresh watcher and fails loudly when that cycle has no successor
+ok - attached arm signals record a classified lifecycle entry
+ok - arm starts cleanly and resurfaces recovery after a dead-pid lock
+ok - arm cleans child watcher and temp output on HUP
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 46736.1788357888.VKNY3A
+ok - arm propagates an immediate watcher wake before confirmation
+ok - arm attaches to a peer watcher after child stands down and surfaces a missing successor
+watcher: lock held by live pid 57098 but heartbeat is stale for 841665905s (>300s); inspect or stop that watcher before re-arming.
+ok - arm reports FAILED and exits non-zero when no fresh watcher can be confirmed
+ok - cycle-exit ledger links a verified successor and remains size-capped
+ok - SIGSTOP distinguishes live PID from stale beacon and termination records the exit class
+FM_TEST_END 2026-09-02T14:05:45Z tests/fm-watcher-lock.test.sh exit=0 duration_ms=133572 gate_skip=false
+FM_TEST_BEGIN 2026-09-02T14:05:45Z tests/fm-pending-reply.test.sh family=unclassified expected_gate_skip=none
+ok - normal correlated reply resolves once (idempotent)
+ok - completed turn with no report triggers exactly one recovery
+ok - recovery attempts reconcile without reinjection
+ok - recovery reply resolves the original expectation
+ok - second missed turn escalates once and remains durable
+ok - escalations and replies wake; the home's own escalation close stays quiet
+ok - failed escalation publication remains retryable and publishes once
+ok - legacy escalation closes under the shared default key
+ok - legacy escalation cannot close an unrelated default-key decision
+ok - foreign correlated blocker cannot impersonate a pending-reply escalation
+ok - concurrent resolution closes one keyed escalation exactly once
+ok - concurrent escalation yields to a late correlated reply
+ok - transport success cannot masquerade as reply success
+ok - undelivered records remain immutable across scan paths
+ok - delivery confirmation fallback reconciles durably
+ok - delivery confirmation serializes with reconciliation
+ok - unrelated events and stale correlation ids cannot resolve
+ok - restart preserves expectation and exact parent destination
+ok - wrong-home reports are detected but do not silently acknowledge
+ok - direct unmarked captain input creates no expectation
+ok - fm-send marked secondmate path creates pending and embeds corr
+ok - status-pointed document resolves the expectation
+ok - optional helper report resolves without being required for correctness
+ok - backend busy/idle observation covers Pi/Claude paths without conversation scrape
+ok - tmux and zellij unknown states use bounded capture fallback
+ok - pending replies scope Kimi capture fallback by recorded harness
+ok - tick skips terminal records and reuses target observations
+ok - correlations are reused only for matching open task records
+ok - tick end-to-end: miss -> one recovery -> escalate -> durable
+ok - failed transport discards undelivered expectation only
+ok - a remote repost waits for the reply channel and still fires on a real miss
+ok - a mirrored correlated remote reply resolves without any repost
+ok - all pending-reply tests passed
+FM_TEST_END 2026-09-02T14:07:14Z tests/fm-pending-reply.test.sh exit=0 duration_ms=88505 gate_skip=false
+FM_TEST_SUMMARY total=2 failed=0 skipped_gate=0 duration_ms=222631
+FM_TEST_SUMMARY_FAMILY family=unclassified count=1 duration_ms=88505 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=1 duration_ms=133572 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-watcher-lock.test.sh duration_ms=133572
+FM_TEST_SLOWEST rank=2 script=tests/fm-pending-reply.test.sh duration_ms=88505
+EXIT=

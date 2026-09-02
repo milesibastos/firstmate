@@ -1,0 +1,23 @@
+# Mutation B: fm_pending_reply_sender_alive made to REQUIRE proof (the teardown-style strictness applied to the pending-reply site).
+# Expected: the new unprovable-identity assertion FAILS (a live sender is reconciled away); after restoring, the case PASSES.
+
+## invocations left in tests/fm-pending-reply.test.sh: test_recovery_attempt_is_never_reinjected 
+
+## mutation applied (git diff bin/fm-pending-reply-lib.sh):
+-  fm_identity_holder_is_current "$expected" "$pid"
++  fm_identity_holder_is_current "$expected" "$pid" || return 1
++  fm_identity_proves_same_process "$FM_IDENTITY_PROOF"   # MUTATION B: require proof
+
+## run with mutation:
+not ok - a live sender whose identity could not be re-proved was reconciled away
+
+## run after restoring bin/fm-pending-reply-lib.sh (same single case):
+ok - recovery attempts reconcile without reinjection
+ok - all pending-reply tests passed
+
+# Before/after: same single case against the BASE (c01d2fb) bin/fm-pending-reply-lib.sh, which re-derived identity with its own fm_pending_reply_pid_identity and exact-string compare.
+## base lib in place: M  bin/fm-pending-reply-lib.sh
+## run against base library:
+not ok - a live sender whose identity could not be re-proved was reconciled away
+
+## worktree after restore: 0 modified files

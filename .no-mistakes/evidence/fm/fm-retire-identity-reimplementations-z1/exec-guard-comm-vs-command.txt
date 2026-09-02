@@ -1,0 +1,12 @@
+# Structural exec detection: ps -o comm= vs ps -o command= on a fifo-gated child
+# child: bash -c 'read -r _ < "$0"; exec sleep 30' <gate>
+
+## BEFORE release (child still blocked in bash, pre-exec)
+comm=    bash
+command= bash -c read -r _ < "$0"; exec sleep 30 /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T//fm-exec-guard.sNx5EO/gate
+glob *sleep* on command= : MATCHES (textual guard would pass vacuously here)
+glob sleep  on comm=    : NO MATCH (structural guard correctly says pre-exec)
+
+## AFTER release (polled comm= until it read sleep; polls needed: 0)
+comm=    sleep
+command= sleep 30
