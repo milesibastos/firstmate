@@ -226,14 +226,28 @@ PR_BODY_VALUE=
 # One live read: the head and the body come back in a single response, so the
 # pair always describes one instant. Splitting them across two calls would
 # reintroduce exactly the skew this script exists to remove.
+#
+# stdout and stderr are captured separately: gh's stderr is never parsed as
+# data, only surfaced on failure, so a warning ahead of an otherwise-successful
+# response can never be mistaken for the head. PR_HEAD_VALUE/PR_BODY_VALUE are
+# only assigned once the whole shape has validated, so a read this function
+# rejects can never mutate either global - the caller's retry loop always sees
+# the last fully-validated pair, never a head from one read paired with a body
+# from another.
 read_pr() {
-  local marker raw rest
+  local marker raw rest err_file parsed_head parsed_body
   marker=$(random_token FMPR)
-  raw=$(gh api "repos/$REPO/pulls/$PR_NUMBER" \
-    --jq ".head.sha, \"$marker\", (.body // \"\")" 2>&1) || {
-    printf 'live read failed: %s\n' "$raw" >&2
+  err_file=$(mktemp "${TMPDIR:-/tmp}/fm-pr-attestation-settle.XXXXXX") || {
+    printf 'live read failed: could not allocate a temp file for stderr\n' >&2
     return 1
   }
+  if ! raw=$(gh api "repos/$REPO/pulls/$PR_NUMBER" \
+    --jq ".head.sha, \"$marker\", (.body // \"\")" 2>"$err_file"); then
+    printf 'live read failed: %s\n' "$(cat "$err_file")" >&2
+    rm -f "$err_file"
+    return 1
+  fi
+  rm -f "$err_file"
   case "$raw" in
     *"$marker"*) ;;
     *)
@@ -241,16 +255,18 @@ read_pr() {
       return 1
       ;;
   esac
-  PR_HEAD_VALUE=${raw%%$'\n'*}
+  parsed_head=${raw%%$'\n'*}
   rest=${raw#*$'\n'}
   case "$rest" in
-    "$marker") PR_BODY_VALUE='' ;;
-    "$marker"$'\n'*) PR_BODY_VALUE=${rest#"$marker"$'\n'} ;;
+    "$marker") parsed_body='' ;;
+    "$marker"$'\n'*) parsed_body=${rest#"$marker"$'\n'} ;;
     *)
       printf 'live read returned an unrecognised shape\n' >&2
       return 1
       ;;
   esac
+  PR_HEAD_VALUE=$parsed_head
+  PR_BODY_VALUE=$parsed_body
   return 0
 }
 

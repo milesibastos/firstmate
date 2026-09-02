@@ -41,6 +41,8 @@ attested_body() {  # <sha>
 # GH_BODY_AFTER  optional: switch to GH_BODY_FILE_2 from this read onward
 # GH_COUNT_FILE  read counter
 # GH_FAIL_UNTIL  optional: fail this many reads first
+# GH_STDERR_NOISE  optional: write this text to stderr ahead of an otherwise
+#                  well-formed, exit-0 response (a CLI warning, proxy notice)
 install_fake_gh() {  # <fakebin>
   cat > "$1/gh" <<'SH'
 #!/usr/bin/env bash
@@ -58,6 +60,9 @@ printf '%s' "$n" > "$GH_COUNT_FILE"
 if [ "$n" -le "${GH_FAIL_UNTIL:-0}" ]; then
   printf 'gh: HTTP 502\n' >&2
   exit 1
+fi
+if [ -n "${GH_STDERR_NOISE:-}" ]; then
+  printf '%s\n' "$GH_STDERR_NOISE" >&2
 fi
 # The script frames the response with a random marker embedded in its --jq
 # expression; echo that framing back the way the real gh --jq would.
@@ -164,6 +169,23 @@ test_body_and_head_come_from_one_read() {
     || fail "an already-bound PR took $(cat "$tmp/count") reads; head and body must arrive together in one"
   assert_contains "$out" "1 read(s)" "settle did not report a single live read"
   pass "the judged body and head are resolved from a single live read"
+}
+
+# A gh warning ahead of an otherwise well-formed, exit-0 response must never be
+# mistaken for the parsed head: stdout and stderr must be captured separately,
+# and the shape check must gate the assignment, not just the return code.
+test_stderr_noise_does_not_corrupt_the_parsed_head() {
+  local tmp fakebin out rc
+  tmp=$(fm_test_tmproot fm-settle-stderr-noise)
+  fakebin=$(setup_world "$tmp" "$HEAD_NEW" "$(attested_body "$HEAD_NEW")")
+
+  rc=0
+  out=$(GH_STDERR_NOISE='warning: proxy is slow today' run_settle "$tmp" "$fakebin" \
+    --repo o/r --pr 7 --event edited --output "$tmp/out") || rc=$?
+  [ "$rc" -eq 0 ] || fail "settle failed on a read with benign stderr noise"$'\n'"$out"
+  [ "$(emitted_head "$tmp/out")" = "$HEAD_NEW" ] \
+    || fail "stderr noise corrupted the emitted head"$'\n'"$(cat "$tmp/out")"
+  pass "stderr noise ahead of a well-formed response never corrupts the parsed head"
 }
 
 # --- the constraint: none of this may assert less ---------------------------
@@ -372,6 +394,7 @@ test_required_arguments_are_enforced() {
 
 test_synchronize_waits_for_the_pipeline_body_write
 test_body_and_head_come_from_one_read
+test_stderr_noise_does_not_corrupt_the_parsed_head
 test_genuinely_stale_attestation_is_handed_over_still_mismatched
 test_empty_live_values_refuse_rather_than_fall_back
 test_unreadable_pull_request_fails_closed
