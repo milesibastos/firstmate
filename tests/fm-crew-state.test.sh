@@ -1679,6 +1679,277 @@ outcome: failed"
   pass "the exemption never applies to a terminal run"
 }
 
+# --- branch OWNERSHIP: which run currently holds the branch -----------------
+# Regression pair for the 2026-08-31 misattribution: a task with a superseded
+# run and a live successor was reported FAILED, because attribution picked the
+# terminal run instead of the one that owns the branch. `failed` is a
+# stop-and-escalate signal, so a healthy crew was one read away from being
+# interrupted or replaced.
+#
+# `branch_sync.pipeline.run` is the pipeline's own record of the holder, so
+# these fixtures carry it exactly as the real CLI emits it (verified against
+# no-mistakes v1.60.2). Ownership is the ONLY non-inferred answer: recency
+# picks the newest row even when it is terminal, and head equality rejects
+# precisely the live run whose lane head never reached the task worktree.
+run_owned() {  # <branch> <run-id> <head> <owner-run-id> [<sync-state>]
+  cat <<EOF
+run:
+  id: "$2"
+  branch: $1
+  status: running
+  head: "$3"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    review,running,0,0
+branch_sync:
+  state: ${5:-push_in_progress}
+  changed: false
+  local:
+    branch: $1
+    head: "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
+    clean: true
+  pipeline:
+    run: "$4"
+    status: running
+    phase: push
+    submitted_head: 101578ebc5c659f096882a617c8c55e9f11dc64b
+    current_head: 15c5400906f9f004eb04bb0f2795cc8a26a16cb7
+  next_action:
+    code: continue_active_run
+    command: no-mistakes axi status
+EOF
+}
+
+# Half 1 of the fix, the reported bug itself, through the coarse runs-list
+# scan. The list is newest-first: a live successor row whose head is
+# RESOLVABLE here but does not bind (a sibling lane commit), sitting above the
+# superseded `cancelled` row whose head is exactly this worktree's HEAD.
+# Before the fix the scan continued past the successor onto that older row and
+# reported `failed - run cancelled` for a healthy task.
+test_coarse_superseded_row_never_beats_live_successor() {
+  reset_fakes
+  local d head_short lane_short
+  d=$(new_case k1-superseded-vs-live)
+  make_repo_on_branch "$d/wt" fm/feat-k1
+  # A sibling commit: resolvable in this worktree, but NOT a descendant of
+  # HEAD, so the head rule correctly refuses to bind it.
+  git -C "$d/wt" checkout -q -b lane-k1
+  git -C "$d/wt" commit -q --allow-empty -m lane
+  lane_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  git -C "$d/wt" checkout -q fm/feat-k1
+  git -C "$d/wt" commit -q --allow-empty -m local
+  head_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1.meta" "window=fm:fm-feat-k1" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-k1.status"
+  # axi status answers another branch, so attribution can only go coarse.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-k1 ${lane_short}  2026-08-31 14:00
+  cancelled  fm/feat-k1 ${head_short}  2026-08-31 13:00
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-k1
+  local out; out=$(run_crew_state "$d" feat-k1)
+  assert_not_contains "$out" "state: failed" "a superseded cancelled row must never be reported as failed"
+  assert_not_contains "$out" "run cancelled" "the superseded run must not supply the detail"
+  assert_contains "$out" "state: unknown" "unresolvable attribution reports unknown"
+  assert_contains "$out" "run attribution unresolved" "and says so rather than guessing"
+  pass "a superseded cancelled row never beats a live successor"
+}
+
+# Half 2a: the run that OWNS the branch is attributed even when its lane head
+# is not a git object here and branch_sync.state is not the single literal
+# `pipeline_owned` the old exemption tested for. This is the live
+# push_in_progress shape observed on 2026-09-01; before the fix it bound
+# nothing and fell through to the stale status log.
+test_owned_run_attributed_regardless_of_sync_state_label() {
+  reset_fakes
+  local d; d=$(new_case k1-owned-push-in-progress)
+  make_repo_on_branch "$d/wt" fm/feat-k1b
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1b.meta" "window=fm:fm-feat-k1b" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: waiting on push access\n' > "$d/state/feat-k1b.status"
+  FM_FAKE_AXI_STATUS="$(run_owned fm/feat-k1b 01OWNER f0f0f0f0 01OWNER push_in_progress)"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-k1b
+  local out; out=$(run_crew_state "$d" feat-k1b)
+  assert_contains "$out" "state: working" "the branch-holding run is authoritative"
+  assert_contains "$out" "source: run-step" "and is attributed as a run-step"
+  assert_not_contains "$out" "source: status-log" "the stale log must not answer over the owning run"
+  pass "the run that owns the branch is attributed whatever the sync-state label"
+}
+
+# Half 2b: `axi status` answered with a run the pipeline no longer holds. The
+# named owner is asked directly and IT is attributed - never the superseded
+# run, and never an older coarse row.
+test_foreign_status_run_defers_to_named_owner() {
+  reset_fakes
+  local d; d=$(new_case k1-foreign-owner)
+  make_repo_on_branch "$d/wt" fm/feat-k1c
+  local head_short; head_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1c.meta" "window=fm:fm-feat-k1c" "worktree=$d/wt" "kind=ship" "harness=claude"
+  # The superseded run's head is EXACTLY this worktree HEAD, so the head rule
+  # would happily bind it - ownership is what stops that.
+  FM_FAKE_AXI_STATUS="$(run_owned fm/feat-k1c 01OLD "$head_short" 01NEW)
+outcome: cancelled"
+  FM_FAKE_AXI_STATUS_RUN="$(run_owned fm/feat-k1c 01NEW f0f0f0f0 01NEW)"
+  FM_FAKE_RUNS_LIST="  cancelled  fm/feat-k1c ${head_short}  2026-08-31 13:00"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-k1c
+  local out; out=$(run_crew_state "$d" feat-k1c)
+  assert_not_contains "$out" "state: failed" "the superseded run must not be attributed"
+  assert_contains "$out" "state: working" "the run named as branch holder is attributed instead"
+  assert_contains "$out" "source: run-step" "attribution stays run-step sourced"
+  pass "a superseded axi-status run defers to the run named as branch holder"
+}
+
+# Half 2c: the unresolvable case is REPORTED, not guessed. The branch is held
+# by a run that cannot be read back, so there is no honest run verdict - and
+# the status log below (a stale `working:` event) must not be dressed up as
+# one.
+test_unresolvable_owner_reports_unknown_not_the_status_log() {
+  reset_fakes
+  local d; d=$(new_case k1-unresolvable-owner)
+  make_repo_on_branch "$d/wt" fm/feat-k1d
+  local head_short; head_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1d.meta" "window=fm:fm-feat-k1d" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-k1d.status"
+  FM_FAKE_AXI_STATUS="$(run_owned fm/feat-k1d 01OLD "$head_short" 01GONE)
+outcome: cancelled"
+  FM_FAKE_AXI_STATUS_RUN=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-k1d
+  local out; out=$(run_crew_state "$d" feat-k1d)
+  assert_contains "$out" "state: unknown" "an unreadable branch holder is unknown, not a guess"
+  assert_contains "$out" "run attribution unresolved" "the reason is reported"
+  assert_not_contains "$out" "source: status-log" "the stale status log must not answer here"
+  assert_not_contains "$out" "state: failed" "and the superseded run is still not attributed"
+  pass "an unresolvable branch holder is reported as unresolvable"
+}
+
+# A live busy pane is real current evidence, so it still outranks the
+# unresolved-attribution report: unknown replaces the stale LOG guess, not a
+# verified reading of the crew itself.
+test_busy_pane_still_wins_over_unresolved_attribution() {
+  reset_fakes
+  local d; d=$(new_case k1-busy-beats-unresolved)
+  make_repo_on_branch "$d/wt" fm/feat-k1e
+  local head_short; head_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1e.meta" "window=fm:fm-feat-k1e" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_owned fm/feat-k1e 01OLD "$head_short" 01GONE)
+outcome: cancelled"
+  FM_FAKE_AXI_STATUS_RUN=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-k1e)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-k1e busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-k1e)
+  assert_contains "$out" "state: working" "a busy pane is real evidence and still reports working"
+  assert_contains "$out" "source: pane" "sourced from the pane, not an attributed run"
+  pass "a busy pane still outranks the unresolved-attribution report"
+}
+
+# `branch_sync.pipeline.run` persists after the pipeline RELEASES the branch -
+# observed live as branch_sync.state=user_owned naming a cancelled run - so it
+# is the branch's run OF RECORD, not proof of a live holder. Ownership may
+# therefore waive the head check only for an ACTIVE run. A terminal run of
+# record keeps it: a crew that already committed a fix past a failed run is
+# working, and reporting `failed` there is the same stop-and-escalate error
+# this fix exists to remove, just reached from the other side.
+test_terminal_run_of_record_still_obeys_the_head_rule() {
+  reset_fakes
+  local d run_short
+  d=$(new_case k1-terminal-of-record)
+  make_repo_on_branch "$d/wt" fm/feat-k1f
+  run_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  # The crew has already committed a fix past the failed run's head.
+  git -C "$d/wt" commit -q --allow-empty -m fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1f.meta" "window=fm:fm-feat-k1f" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_owned fm/feat-k1f 01REC "$run_short" 01REC user_owned)
+outcome: failed"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-k1f)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-k1f busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-k1f)
+  assert_not_contains "$out" "state: failed" "a crew working past a terminal run of record is not failed"
+  assert_contains "$out" "state: working" "the busy crew reads working"
+  assert_contains "$out" "source: pane" "through the pane, as before ownership existed"
+  pass "a terminal run of record still obeys the head rule"
+}
+
+# Same rule, reached via the foreign re-query instead of the direct owned
+# path: the named branch holder confirms both branch and self-ownership, but
+# is TERMINAL and its head is a strict ancestor of the worktree HEAD (the crew
+# already committed a fix past it). That is a KNOWN state, not an unresolved
+# one, so it must fall through to the pane exactly as the owned path does -
+# never report `failed`, and never dress it up as unresolved either.
+test_foreign_owner_terminal_head_mismatch_falls_through() {
+  reset_fakes
+  local d run_short
+  d=$(new_case k1-foreign-owner-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-k1g
+  run_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  # The crew has already committed a fix past the owner-of-record's head.
+  git -C "$d/wt" commit -q --allow-empty -m fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1g.meta" "window=fm:fm-feat-k1g" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS="$(run_owned fm/feat-k1g 01OLD f0f0f0f0 01NEW)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_owned fm/feat-k1g 01NEW "$run_short" 01NEW)
+outcome: failed"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-k1g)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-k1g busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" feat-k1g)
+  assert_not_contains "$out" "state: failed" "a crew working past the foreign-resolved terminal owner is not failed"
+  assert_contains "$out" "state: working" "the busy crew reads working"
+  assert_contains "$out" "source: pane" "falls through to the pane, as the owned path does for the same shape"
+  pass "a terminal owner reached via the foreign re-query still obeys the head rule"
+}
+
+# Same scenario with an idle pane, so the silent fall-through is directly
+# observable instead of being masked by the busy-pane short circuit above:
+# it must reach the status log, and must NOT be reported as unresolved.
+test_foreign_owner_terminal_head_mismatch_falls_through_to_status_log() {
+  reset_fakes
+  local d run_short
+  d=$(new_case k1-foreign-owner-terminal-idle)
+  make_repo_on_branch "$d/wt" fm/feat-k1h
+  run_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  # The crew has already committed a fix past the owner-of-record's head.
+  git -C "$d/wt" commit -q --allow-empty -m fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-k1h.meta" "window=fm:fm-feat-k1h" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-k1h.status"
+  FM_FAKE_AXI_STATUS="$(run_owned fm/feat-k1h 01OLD f0f0f0f0 01NEW)"
+  FM_FAKE_AXI_STATUS_RUN="$(run_owned fm/feat-k1h 01NEW "$run_short" 01NEW)
+outcome: failed"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-k1h
+  local out; out=$(run_crew_state "$d" feat-k1h)
+  assert_not_contains "$out" "state: failed" "a crew working past the foreign-resolved terminal owner is not failed"
+  assert_not_contains "$out" "state: unknown" "the proven head mismatch is a known state, not an unresolved one"
+  assert_not_contains "$out" "run attribution unresolved" "silent fall-through must not be dressed up as unresolved"
+  assert_contains "$out" "source: status-log" "falls through to the status log, as the owned path does for the same shape"
+  assert_contains "$out" "state: working" "the status log's working verb is read"
+  pass "a terminal owner reached via the foreign re-query falls through to the status log, not unresolved"
+}
+
 test_missing_run_head_falls_back_to_current_state() {
   reset_fakes
   local d out
@@ -1759,6 +2030,14 @@ test_failed_run_with_no_later_run_still_surfaces
 test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_non_pipeline_owned_unresolvable_head_not_attributed
 test_pipeline_owned_terminal_run_not_exempt
+test_coarse_superseded_row_never_beats_live_successor
+test_owned_run_attributed_regardless_of_sync_state_label
+test_foreign_status_run_defers_to_named_owner
+test_unresolvable_owner_reports_unknown_not_the_status_log
+test_busy_pane_still_wins_over_unresolved_attribution
+test_terminal_run_of_record_still_obeys_the_head_rule
+test_foreign_owner_terminal_head_mismatch_falls_through
+test_foreign_owner_terminal_head_mismatch_falls_through_to_status_log
 test_missing_run_head_falls_back_to_current_state
 
 echo "all fm-crew-state tests passed"

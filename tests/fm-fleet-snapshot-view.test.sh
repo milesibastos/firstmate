@@ -419,6 +419,77 @@ test_event_hints_follow_reconciled_current_state() {
   pass "snapshot event hints follow reconciled current state"
 }
 
+# An `unknown` current-state verdict is the reader saying it could NOT
+# establish the state - here, a run attribution it refused to guess at. It
+# still carries a run-step source, because run-step names what the reader
+# failed to read, not what it read. The open-decision clearing must therefore
+# NOT treat it as activity evidence: a crew whose validation is in an unknown
+# condition has not answered its captain call, and swallowing that call would
+# hide the decision exactly when supervision needs it most.
+test_unknown_current_state_keeps_open_decision_surfacing() {
+  local home fakebin out wt head_short
+  home=$(make_home unknown-keeps-decision)
+  wt="$home/projects/unresolved-attrib"
+  mkdir -p "$wt"
+  fm_git_identity fmtest fmtest@example.invalid
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  git -C "$wt" checkout -q -b fm/unresolved-attrib
+  head_short=$(git -C "$wt" rev-parse --short=8 HEAD)
+  fm_write_meta "$home/state/unresolved-attrib.meta" \
+    "window=firstmate:fm-unresolved-attrib" \
+    "worktree=$wt" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  record_claude_idle "$home/state" unresolved-attrib
+  printf 'needs-decision: choose an API shape\n' > "$home/state/unresolved-attrib.status"
+  fakebin=$(make_fakebin "$home")
+  # `axi status` answers with a run the pipeline no longer holds (branch_sync
+  # names 01NEW), and 01NEW cannot be read back - so no run is attributable.
+  cat > "$fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  axi)
+    shift
+    case "\${1:-}" in
+      status)
+        shift
+        [ "\${1:-}" = --run ] && exit 0
+        cat <<'TOON'
+run:
+  id: "01OLD"
+  branch: fm/unresolved-attrib
+  status: cancelled
+  outcome: cancelled
+  head: "$head_short"
+  findings: none
+branch_sync:
+  state: released
+  changed: false
+  pipeline:
+    run: "01NEW"
+    status: running
+TOON
+        ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    def task($id): (.tasks[] | select(.id == $id));
+    task("unresolved-attrib").current_state.state == "unknown"
+      and task("unresolved-attrib").current_state.source == "run-step"
+      and task("unresolved-attrib").hints.pending_decision == true
+  ' >/dev/null || fail "an unknown current state must keep the open decision surfacing"
+  pass "an unknown current state keeps the open decision surfacing"
+}
+
 test_scout_reports_include_teardown_reports() {
   local home out
   home=$(make_home teardown-reports)
@@ -1137,6 +1208,7 @@ test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
+test_unknown_current_state_keeps_open_decision_surfacing
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot

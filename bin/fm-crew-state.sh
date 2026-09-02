@@ -26,8 +26,22 @@
 #      to the routed status log; dead/missing report the remote verdict; an
 #      unreachable or unreadable remote reports unknown-remote, never a false
 #      gone/dead.
-#   2. Attribute an active or terminal no-mistakes run under the branch, head,
-#      pipeline-custody, and newest-first rules owned by bin/fm-nm-run-lib.sh.
+#   2. Attribute the run that currently OWNS this crew's branch, under the
+#      ownership, branch, head, and newest-first rules owned by
+#      bin/fm-nm-run-lib.sh. Ownership comes first because it is the only
+#      non-inferred answer: `branch_sync.pipeline.run` is the pipeline's own
+#      record of which run the branch belongs to (it outlives the branch's
+#      release, so it waives the head rule only for an ACTIVE run).
+#      A branch with more than one run is where the
+#      inferred answers break - recency picks the newest row even when it is a
+#      superseded terminal one (reported as `failed`, a stop-and-escalate
+#      signal, for a healthy crew), and head equality rejects precisely the
+#      live run whose lane head never reached this worktree. A confirmed run
+#      of record that is terminal with a proven head mismatch is a KNOWN
+#      state, not an unresolved one, and falls through silently to step 4.
+#      Only a genuinely UNRESOLVED attribution - an unreadable or unconfirmed
+#      owner, or a same-branch row that does not bind - is REPORTED as unknown
+#      rather than guessed from the status log (step 4).
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -43,6 +57,16 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
+#      A run that EXISTS on this crew's branch but is left UNRESOLVED is NOT
+#      this case: the busy pane still answers (it is live evidence of the
+#      crew, not an inference about the run), but the status log does not.
+#      That reports unknown · run-step with the reason, because the log is an
+#      event history that may predate the run entirely, and a confident state
+#      for a crew whose validation is in an unknown condition is the failure
+#      this helper exists to prevent. A confirmed run of record that is
+#      terminal with a proven head mismatch is a KNOWN state, not this one, so
+#      it reaches the pane and status log exactly as it did before ownership
+#      existed.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
@@ -422,7 +446,8 @@ nm_ci_checks_state() {
 # This fallback used to shell out to `no-mistakes axi` (bare, no subcommand)
 # expecting a `runs[N]{id,branch,status,...}:` TOON table and re-query the
 # matched id via `axi status --run <id>`. Verified against the real installed
-# CLI (v1.32.2): the `axi` surface exposes only abort/logs/respond/run/status -
+# CLI (re-verified v1.60.2): the `axi` surface exposes only
+# abort/logs/respond/run/status/sync -
 # there is no runs-listing subcommand under `axi` at all, so that table never
 # appears and the lookup was silently dead code; whenever the bare `axi
 # status` answer was not this crew's own branch, attribution always failed and
@@ -456,14 +481,17 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
+      # The list is newest-first, so the FIRST row for this branch is the only
+      # candidate: every later row is an older run on the same branch, which
+      # the newer one superseded. That is why a head mismatch here STOPS the
+      # scan rather than continuing it. Continuing was the 2026-08-31
+      # misattribution - a live successor whose head did not bind fell through
+      # onto the superseded `cancelled` row below it, and a healthy crew was
+      # reported as failed. Unknown attribution is a supervisable answer; a
+      # confidently-wrong terminal one is not.
       if ! nm_coarse_head_matches_worktree "$sha"; then
-        # An UNRESOLVABLE head is unknown attribution, not a proven
-        # mismatch. Stop instead of surfacing an older, superseded row;
-        # the caller's pane/log fallback can answer without misattribution.
-        fm_nm_head_resolvable "$WT" "$sha" || return 0
-        continue
+        printf '?%s run on this branch at %s does not bind to this copy' "$st" "$sha"
+        return 0
       fi
       printf '%s' "$st"
       return 0
@@ -499,17 +527,72 @@ HAVE_RUN=0
 # run-step block below skips the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
+RUN_OWNERSHIP=unknown
+# 1 once a run for THIS crew's branch has been seen, whether or not it could be
+# attributed. It is what separates "no run at all" (the ordinary pre-validation
+# crew, which reads its state from the pane or log) from "a run exists on this
+# branch and none of it could be attributed" - the honest cannot-tell reported
+# below, which must never be dressed up as a stale status-log verdict.
+BRANCH_RUN_SEEN=0
+ATTRIB_UNRESOLVED=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    # Head equality, or the pipeline-owned-active exemption: while the
-    # pipeline owns this branch, the daemon's own branch attribution is
-    # authoritative and the lane head need not be a git object here
-    # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+    # Ownership first: branch_sync names the run that currently HOLDS this
+    # branch (fm_nm_run_branch_ownership in bin/fm-nm-run-lib.sh). It is the
+    # only non-inferred answer available, so it outranks both the head rule
+    # and the coarse list.
+    #   owned   - attribute it if active or head-matching; a terminal head
+    #             mismatch is a known state and falls through instead (see
+    #             the owned branch below).
+    #   foreign - `axi status` answered with a superseded run. Ask the named
+    #             owner directly instead; never fall to the coarse list, whose
+    #             every same-branch row is older and therefore also superseded.
+    #   unknown - no ownership record (a CLI without branch sync): fall back to
+    #             head equality, then the pipeline-owned-active exemption.
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ]; then
+      BRANCH_RUN_SEEN=1
+      RUN_OWNERSHIP=$(fm_nm_run_branch_ownership "$RUN_OUT")
+    else
+      RUN_OWNERSHIP=unknown
+    fi
+    if [ "$RUN_OWNERSHIP" = owned ]; then
+      # Ownership waives the head check only for an ACTIVE run, whose lane
+      # head is routinely not a git object here. `branch_sync.pipeline.run`
+      # PERSISTS after the pipeline releases the branch (observed live as
+      # branch_sync.state=user_owned still naming a cancelled run), so for a
+      # terminal run it names the branch's run OF RECORD, not a live holder -
+      # and a crew that has already committed a fix past that run is working,
+      # not failed. Keeping the head rule there is what stops this fix from
+      # reintroducing the same wrong `failed` from the other side. A proven
+      # mismatch is a KNOWN state, not an unresolved one, so it falls through
+      # to the pane and log exactly as it did before ownership existed.
+      if fm_nm_run_is_active "$RUN_OUT" || nm_run_head_matches_worktree; then
+        HAVE_RUN=1
+      fi
+    elif [ "$RUN_OWNERSHIP" = foreign ]; then
+      # Re-ask for the run that actually owns the branch. An owner that
+      # confirms both this branch and its own ownership is subject to the
+      # same active-or-head-matching rule as the owned branch above: a proven
+      # terminal mismatch is a KNOWN state and falls through silently, same as
+      # there. A stale or unreadable answer, or one that never confirms
+      # attribution, reports unresolved instead of guessing again.
+      owner_id=$(fm_nm_branch_sync_pipeline_run "$RUN_OUT")
+      owner_out=$(nm_run axi status --run "$owner_id")
+      if [ -n "$owner_out" ] \
+        && [ "$(strip_quotes "$(fm_nm_field "$owner_out" branch)")" = "$CREW_BRANCH" ] \
+        && [ "$(fm_nm_run_branch_ownership "$owner_out")" = owned ]; then
+        RUN_OUT="$owner_out"
+        if fm_nm_run_is_active "$owner_out" || nm_run_head_matches_worktree; then
+          HAVE_RUN=1
+        fi
+      else
+        ATTRIB_UNRESOLVED="branch held by run $owner_id, which did not confirm attribution"
+      fi
+    elif [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
       && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
       HAVE_RUN=1
     else
@@ -520,11 +603,22 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
+      # A leading `?` is the scan's unresolved verdict (it runs in a command
+      # substitution, so it reports through its output, not by assignment).
       COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
-      if [ -n "$COARSE_STATUS" ]; then
-        HAVE_RUN=1
-        RUN_SOURCE=coarse
-      fi
+      case "$COARSE_STATUS" in
+        "") ;;
+        \?*)
+          BRANCH_RUN_SEEN=1
+          ATTRIB_UNRESOLVED="${COARSE_STATUS#\?}"
+          COARSE_STATUS=""
+          ;;
+        *)
+          BRANCH_RUN_SEEN=1
+          HAVE_RUN=1
+          RUN_SOURCE=coarse
+          ;;
+      esac
     fi
   fi
 fi
@@ -671,6 +765,18 @@ if [ "$KIND" != secondmate ]; then
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
+fi
+
+# A run exists on this crew's branch and none of it could be attributed. The
+# status log below cannot answer this: it is an event log whose last line may
+# predate the run entirely, so reading it here would report a confident state
+# for a crew whose validation is in an unknown condition - the exact failure
+# this helper exists to prevent. Say so instead. Unknown is supervisable; a
+# wrong `working`, `paused`, or `failed` is not. The pane check above still
+# wins when it has a live busy verdict, because that is real current evidence
+# rather than an inference about the run.
+if [ "$BRANCH_RUN_SEEN" = 1 ] && [ -n "$ATTRIB_UNRESOLVED" ]; then
+  emit unknown run-step "run attribution unresolved: $ATTRIB_UNRESOLVED"
 fi
 
 # Fall back to the status log's last line, but ONLY when its verb maps to a real
