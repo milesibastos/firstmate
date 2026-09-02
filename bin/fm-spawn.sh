@@ -1124,7 +1124,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
   [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+    # Name the verb that actually applies. A `missing` endpoint has no agent to
+    # stop, so pointing it at `exit` sends the caller in a circle; its exit is
+    # `reconcile`, which rebuilds the endpoint from this same record and leaves
+    # this guard exactly as strict as it is.
+    if [ "$RELAUNCH_STATE" = missing ]; then
+      echo "error: task $ID's endpoint reads 'missing'; a relaunch requires a positively agent-free endpoint, and there is no agent to stop. Rebuild the endpoint first with bin/fm-control.sh $ID reconcile" >&2
+    else
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+    fi
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)

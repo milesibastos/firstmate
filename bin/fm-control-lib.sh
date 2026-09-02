@@ -48,12 +48,13 @@ fm_control_verbs() {
 interrupt
 exit
 relaunch
+reconcile
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|relaunch|reconcile) return 0 ;;
   esac
   return 1
 }
@@ -190,6 +191,20 @@ fm_control_backend_supports_key() {  # <backend> <key>
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
     tmux|herdr) return 0 ;;
+  esac
+  return 1
+}
+
+# Whether <backend> can rebuild a provably absent endpoint from the task record
+# (bin/fm-backend.sh's fm_backend_endpoint_rebuild). Only tmux can: its endpoint
+# identity IS the recorded session and window name, so the record contains
+# everything a reconstruction needs. Herdr records opaque workspace, tab, and
+# pane ids instead, which a rebuild would have to republish into the task's
+# metadata as part of the same transaction; that is a different mechanism and is
+# not verified, so `reconcile` refuses there by name rather than half-doing it.
+fm_control_backend_endpoint_rebuildable() {  # <backend>
+  case "${1-}" in
+    tmux) return 0 ;;
   esac
   return 1
 }

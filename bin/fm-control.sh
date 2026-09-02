@@ -7,6 +7,7 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
+#        fm-control.sh <task-id> reconcile
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane: conversational text for the agent to read, always routing-marked
@@ -50,6 +51,16 @@
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
+#   reconcile  Rebuild a provably absent ENDPOINT from the task's own record, so
+#              a task whose terminal host died has a way back to the ordinary
+#              stop-and-relaunch path. It launches no agent and writes no
+#              metadata: it restores the endpoint, leaving the replacement to
+#              `relaunch`, whose guards are untouched. Only an authoritative
+#              `missing` is rebuilt, only after nothing anywhere on the host
+#              carries this task's label and nothing holds its worktree, and the
+#              rebuilt endpoint must come up agent-free in the recorded worktree
+#              or it is removed again. An endpoint that already exists is
+#              reported as such rather than replaced.
 #
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
@@ -82,6 +93,9 @@
 #     than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
+#   - `reconcile` is refused on a backend whose endpoint identity cannot be
+#     reconstructed from the task record (herdr records runtime workspace, tab,
+#     and pane ids that a rebuild would have to republish).
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -89,6 +103,7 @@
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
+#   FM_CONTROL_RECONCILE_WAIT    settle wait for a rebuilt endpoint (30)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -130,6 +145,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-lock-lib.sh
+. "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -140,6 +157,7 @@ SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
+RECONCILE_WAIT=${FM_CONTROL_RECONCILE_WAIT:-30}
 
 die() {  # <message>
   echo "error: $1" >&2
@@ -454,7 +472,7 @@ do_exit() {
       return 0
       ;;
     alive) ;;
-    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
+    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; rebuild it with 'bin/fm-control.sh $ID reconcile' before any further control action" ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
@@ -849,6 +867,173 @@ do_relaunch() {
   echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
 }
 
+# --- endpoint-host reconciliation -------------------------------------------
+#
+# `missing` means the recorded endpoint is authoritatively absent, and refusing
+# every agent-facing verb on it is right: the endpoint might be alive elsewhere.
+# What was missing is a way OUT of that state. When the terminal session hosting
+# the fleet dies, every task's endpoint goes `missing` at once, `exit` refuses
+# because there is no agent to stop, and a relaunch refuses because only a
+# positively agent-free endpoint may be launched into.
+#
+# `reconcile` is that exit, and it deliberately adds a transition rather than
+# relaxing a guard: it rebuilds the recorded endpoint from the task's own
+# durable record so the endpoint is `dead` again, and every existing guard then
+# applies unchanged. It launches no agent and writes no metadata. The relaunch
+# that follows still has to prove the endpoint is agent-free and sitting in the
+# recorded worktree.
+#
+# What it proves before rebuilding anything:
+#   1. The recovery-grade classifier says `missing` - not `ambiguous`, not
+#      `unreadable`. Only an authoritative absence is reconciled.
+#   2. No endpoint anywhere on the host carries this task's label. This is the
+#      independent proof, and it is the one that matters: a renamed session
+#      leaves the recorded target unresolvable while its agent runs on, and
+#      rebuilding then would put a second agent on one worktree.
+#   3. The recorded worktree passes the same checkpoint a relaunch runs, and no
+#      live process is holding it - or the holder check is disclosed as
+#      unavailable rather than reported as proof.
+# After rebuilding it confirms the endpoint exists, classifies agent-free, and
+# settled in the recorded worktree; if it did not, it removes the endpoint it
+# just created rather than leaving a broken one behind.
+#
+# A rebuilt endpoint is launch-equivalent to one an `exit` left behind: both are
+# a shell sitting in the recorded worktree, and bin/fm-spawn.sh re-sends every
+# environment export its launch depends on. The only pane setup a relaunch skips
+# is `treehouse get`, which must be skipped, because the worktree already exists
+# and the pane is already in it - which is exactly what this verb establishes.
+
+# reconcile_worktree_holder_refuses: the recovery path's second, independent
+# read on "is anything still running for this task" - a live process holding
+# the recorded worktree. Sets RECONCILE_HOLDER_NOTE and returns 1 when the
+# worktree is provably free or the check is unavailable, 0 when it must refuse.
+RECONCILE_HOLDER_NOTE=
+reconcile_worktree_holder_refuses() {
+  local status
+  local FM_LOCK_LOG_PREFIX="fm-control reconcile"
+  RECONCILE_HOLDER_NOTE=
+  if ! command -v lsof >/dev/null 2>&1; then
+    # A missing lsof must not recreate the very dead end this verb exists to
+    # open: the endpoint proofs above are the load-bearing ones, so disclose
+    # exactly what went unchecked and continue.
+    RECONCILE_HOLDER_NOTE="worktree-holders=unchecked (no lsof)"
+    return 1
+  fi
+  # $? must be read inside the else branch: an `if` whose condition fails
+  # reports its OWN status (0) once the statement ends, which would turn every
+  # provably-free worktree into an unreadable one.
+  if fm_lock_lsof_holder "$WT"; then
+    RECONCILE_HOLDER_NOTE="a live process still holds $WT"
+    return 0
+  else
+    status=$?
+  fi
+  if [ "$status" -ne 1 ]; then
+    RECONCILE_HOLDER_NOTE="the holder check on $WT could not be read"
+    return 0
+  fi
+  RECONCILE_HOLDER_NOTE="worktree-holders=none"
+  return 1
+}
+
+# reconcile_wait_settled_cwd: the rebuilt endpoint's shell must come up in the
+# recorded worktree. A login profile can cd away from the directory tmux started
+# the pane in, so this polls exactly as the launch owner's own worktree guard
+# does. Prints the last path observed.
+reconcile_wait_settled_cwd() {
+  local wt_real seen seen_real i=0
+  wt_real=$(cd "$WT" 2>/dev/null && pwd -P) || wt_real=$WT
+  while [ "$i" -lt 10 ]; do
+    seen=$(fm_backend_endpoint_cwd "$BACKEND" "$T" 2>/dev/null || true)
+    if [ -n "$seen" ]; then
+      seen_real=$(cd "$seen" 2>/dev/null && pwd -P) || seen_real=$seen
+      if [ "$seen_real" = "$wt_real" ]; then
+        printf '%s' "$seen"
+        return 0
+      fi
+    fi
+    i=$((i + 1))
+    [ "$i" -ge 10 ] || sleep 0.5
+  done
+  printf '%s' "$seen"
+  return 1
+}
+
+do_reconcile() {
+  local state sightings sighting_status settled wid hint
+
+  require_state_verified_backend reconcile
+  fm_control_backend_endpoint_rebuildable "$BACKEND" \
+    || die "task $ID runs on the $BACKEND backend, whose endpoint identity is a set of runtime ids recorded in the task's own metadata rather than a name this rebuild could reconstruct; reconcile refuses rather than republishing a record it cannot verify"
+
+  state=$(agent_state)
+  case "$state" in
+    alive)
+      echo "endpoint-present $ID backend=$BACKEND endpoint=$T worktree=$WT agent=alive; nothing to reconcile"
+      return 0
+      ;;
+    dead)
+      # Already reconcilable. Say so - but a `dead` endpoint whose shell is
+      # somewhere other than the recorded worktree is exactly the case a
+      # relaunch refuses, and reporting it as fine here would leave the
+      # operator holding two refusals that never name each other.
+      if settled=$(reconcile_wait_settled_cwd); then
+        echo "endpoint-present $ID backend=$BACKEND endpoint=$T worktree=$WT agent=none; already reconciled"
+        return 0
+      fi
+      die "task $ID's endpoint exists and holds no agent, but its shell is in '${settled:-unknown}' rather than its recorded worktree $WT, so a relaunch will refuse to start an agent outside the copy holding its work; close that endpoint and run this command again to have it rebuilt in the right copy"
+      ;;
+    missing) ;;
+    *)
+      die "task $ID's endpoint reads '$state' rather than an authoritative absence; reconcile rebuilds an endpoint only when the backend can prove there is none, because rebuilding one that is merely unreadable could put a second agent on the same work"
+      ;;
+  esac
+
+  if sightings=$(fm_backend_endpoint_sightings "$BACKEND" "$LABEL"); then
+    sighting_status=0
+  else
+    sighting_status=$?
+  fi
+  [ "$sighting_status" -eq 0 ] \
+    || die "task $ID's endpoint reads 'missing', but the $BACKEND host's own inventory could not be read, so nothing here can prove its agent is not still running under another name; refusing to rebuild"
+  if [ -n "$sightings" ]; then
+    die "task $ID's recorded endpoint $T is gone, but its label $LABEL is still live at: $(printf '%s' "$sightings" | tr '\n' ' '); that is the same task under a different name, not a lost one, so rebuilding would put a second agent on $WT. Address the endpoint that exists"
+  fi
+
+  safe_checkpoint
+  if reconcile_worktree_holder_refuses; then
+    die "task $ID's endpoint is gone, but $RECONCILE_HOLDER_NOTE; a rebuilt endpoint would let a replacement agent join work something else is still doing. Clear that first"
+  fi
+
+  wid=$(fm_backend_endpoint_rebuild "$BACKEND" "$T" "$WT") \
+    || die "task $ID's endpoint $T could not be rebuilt on $BACKEND; nothing was changed"
+
+  if ! fm_backend_target_exists "$BACKEND" "$T" "$LABEL"; then
+    fm_backend_kill "$BACKEND" "$wid" || true
+    die "task $ID's endpoint was rebuilt but does not resolve as $T; the endpoint just created was removed"
+  fi
+  # A brand-new pane is not agent-free the instant it exists: macOS runs `login`
+  # before it execs the shell, and the classifier reads that unattributable
+  # process as `ambiguous`. Wait for the endpoint to settle into a positively
+  # agent-free state rather than tearing down a rebuild that was working.
+  state=$(wait_agent_state "$RECONCILE_WAIT" dead) || true
+  if [ "$state" != dead ]; then
+    fm_backend_kill "$BACKEND" "$wid" || true
+    die "task $ID's rebuilt endpoint classifies as '$state' rather than agent-free; the endpoint just created was removed"
+  fi
+  if ! settled=$(reconcile_wait_settled_cwd); then
+    fm_backend_kill "$BACKEND" "$wid" || true
+    die "task $ID's rebuilt endpoint settled in '${settled:-unknown}' rather than its recorded worktree $WT, so a replacement would start outside the copy holding its work; the endpoint just created was removed"
+  fi
+
+  case "$KIND" in
+    secondmate) hint="bin/fm-control.sh $ID relaunch" ;;
+    *) hint="bin/fm-control.sh $ID relaunch --note '<what happened and where the work stands>'" ;;
+  esac
+  echo "reconciled $ID backend=$BACKEND endpoint=$T worktree=$WT agent=none $RECONCILE_HOLDER_NOTE"
+  echo "next: $hint"
+}
+
 # --- verbs ------------------------------------------------------------------
 
 case "$VERB" in
@@ -874,5 +1059,8 @@ case "$VERB" in
     ;;
   relaunch)
     do_relaunch
+    ;;
+  reconcile)
+    do_reconcile
     ;;
 esac

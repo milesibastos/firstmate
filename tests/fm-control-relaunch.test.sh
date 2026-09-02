@@ -1320,6 +1320,23 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_names_reconcile_for_a_vanished_endpoint() {
+  local dir out rc
+  dir=$(new_case gone rl16)
+  add_ship_task "$dir" rl16 claude
+  # The endpoint's host died: there is no agent to stop, so pointing this
+  # refusal at `exit` would send the caller in a circle.
+  : > "$dir/fake/windows"
+  out=$(run_spawn "$dir" rl16 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunching into a vanished endpoint should refuse"
+  assert_contains "$out" "positively agent-free endpoint" "the refusal should still demand an agent-free endpoint"
+  assert_contains "$out" "fm-control.sh rl16 reconcile"     "a missing endpoint's refusal should name the verb that rebuilds it"
+  case "$out" in
+    *"stop the agent first"*) fail "a missing endpoint has no agent to stop; the refusal must not ask for one" ;;
+  esac
+  pass "fm-spawn --relaunch: a vanished endpoint is pointed at the verb that rebuilds it, not at stopping an agent that is not there"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1528,3 +1545,4 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_spawn_relaunch_names_reconcile_for_a_vanished_endpoint

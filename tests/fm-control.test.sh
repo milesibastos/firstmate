@@ -128,7 +128,66 @@ case "${1:-}" in
     if [ -f "$D/pane" ]; then cat "$D/pane"; else printf '╭────╮\n│    │\n╰────╯\n'; fi
     exit 0 ;;
   list-windows)
+    all=0
+    for a in "$@"; do
+      [ "$a" = -a ] || continue
+      all=1
+    done
+    if [ "$all" = 1 ]; then
+      case "${FM_FAKE_LIST_ALL:-ok}" in
+        no-server) printf 'no server running on /tmp/tmux-0/default\n' >&2; exit 1 ;;
+        unreadable) printf 'lost server\n' >&2; exit 1 ;;
+      esac
+      if [ -f "$D/sightings" ]; then cat "$D/sightings"; fi
+      exit 0
+    fi
     if [ -f "$D/windows" ]; then cat "$D/windows"; fi
+    exit 0 ;;
+  has-session)
+    ses=${3#=}
+    ses=${ses%:}
+    [ -f "$D/sessions" ] && grep -qx "$ses" "$D/sessions"
+    exit $? ;;
+  new-session)
+    shift
+    ses=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -s) ses=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%s\n' "$ses" >> "$D/sessions"
+    printf '%s\n' "new-session $ses" >> "$D/created"
+    exit 0 ;;
+  new-window)
+    shift
+    wname=
+    cwd=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -n) wname=$2; shift 2 ;;
+        -c) cwd=$2; shift 2 ;;
+        -t) target=$2; shift 2 ;;
+        -F) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    n=$(( $(cat "$D/window-seq" 2>/dev/null || echo 0) + 1 ))
+    printf '%s' "$n" > "$D/window-seq"
+    target=${target%:}
+    target=${target#=}
+    printf '%s\n' "$wname" >> "$D/windows"
+    printf '%s:%s\n' "$target" "$wname" >> "$D/sightings"
+    printf '%s\n' "new-window $target $wname $cwd" >> "$D/created"
+    # The pane a rebuild creates comes up where it was told to, unless the case
+    # is exercising a login profile that moves it somewhere else.
+    printf '%s' "${FM_FAKE_REBUILD_CWD:-$cwd}" > "$D/cwd"
+    printf 'zsh' > "$D/command"
+    printf '@%s\n' "$n"
+    exit 0 ;;
+  kill-window)
+    printf '%s\n' "${3:-}" >> "$D/killed"
     exit 0 ;;
 esac
 exit 0
@@ -154,6 +213,8 @@ new_case() {
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
+  : > "$dir/fake/created"
+  : > "$dir/fake/killed"
   printf 'zsh' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   make_tmux_stub "$dir" >/dev/null
@@ -184,6 +245,8 @@ add_task() {
     [ "$backend" = tmux ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s\n' "${window%%:*}" > "$dir/fake/sessions"
+  printf '%s\n' "$window" > "$dir/fake/sightings"
   printf '%s' "$wt" > "$dir/fake/cwd"
 }
 
@@ -197,11 +260,31 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_LIST_ALL="${FM_FAKE_LIST_ALL:-}" \
+    FM_FAKE_REBUILD_CWD="${FM_FAKE_REBUILD_CWD:-}" \
+    FM_FAKE_LSOF="${FM_FAKE_LSOF:-}" \
+    FM_CONTROL_RECONCILE_WAIT=0.05 \
     "$CONTROL" "$@" 2>&1
 }
 
 alive_as() {  # <case-dir> <command-name>
   printf '%s' "$2" > "$1/fake/command"
+}
+
+# endpoint_gone: the state a dead endpoint host leaves behind - the recorded
+# window is absent from a readable inventory, and nothing on the host carries
+# its label.
+endpoint_gone() {  # <case-dir>
+  : > "$1/fake/windows"
+  : > "$1/fake/sightings"
+}
+
+created() {  # <case-dir>
+  cat "$1/fake/created"
+}
+
+killed() {  # <case-dir>
+  cat "$1/fake/killed"
 }
 
 literals() {  # <case-dir>
@@ -441,6 +524,22 @@ test_state_verified_backends_are_exactly_tmux_and_herdr() {
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
   pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state"
+}
+
+test_endpoint_rebuildable_backends_are_exactly_tmux() {
+  local backend
+  fm_control_backend_endpoint_rebuildable tmux \
+    || fail "tmux records its endpoint identity as a session and window name, which a rebuild can reconstruct"
+  # herdr classifies agent state but records opaque runtime ids, so rebuilding
+  # one would have to republish the task record too.
+  for backend in herdr zellij orca cmux; do
+    fm_control_backend_endpoint_rebuildable "$backend" \
+      && fail "$backend's endpoint identity is not reconstructable from the task record and must not claim it is"
+  done
+  fm_control_verbs | grep -qx reconcile \
+    || fail "reconcile must be in the control-plane verb allowlist"
+  fm_control_verb_allowed reconcile || fail "reconcile must be an allowed verb"
+  pass "fm-control-lib: the endpoint rebuild is offered only where the task record holds the endpoint's identity"
 }
 
 # --- 3. exact-id scoping ----------------------------------------------------
@@ -873,6 +972,246 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
 }
 
+# --- 7. endpoint-host reconciliation ----------------------------------------
+#
+# The state a dead terminal session leaves behind: every guard refuses, and
+# until `reconcile` existed none of them named a way out. These pin that the
+# way out adds a transition without loosening a guard - it restores the
+# endpoint and launches nothing.
+
+test_reconcile_rebuilds_a_vanished_endpoint() {
+  local dir out rc
+  dir=$(new_case reconcile-rebuild)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  out=$(run_control "$dir" t1 reconcile); rc=$?
+  expect_code 0 "$rc" "reconciling a vanished endpoint should succeed"$'\n'"$out"
+  assert_contains "$out" "reconciled t1" "the outcome should name the rebuilt task"
+  assert_contains "$out" "agent=none" "a reconciled endpoint holds no agent"
+  assert_contains "$out" "next: bin/fm-control.sh t1 relaunch --note" \
+    "the outcome should name the command that brings an agent back"
+  case "$(created "$dir")" in
+    *"new-window fmses fm-t1 $dir/wt-t1"*) : ;;
+    *) fail "the rebuild should create the recorded window in the recorded worktree, got: $(created "$dir")" ;;
+  esac
+  [ -z "$(literals "$dir")" ] || fail "reconcile must launch no agent, typed: $(literals "$dir")"
+  [ -z "$(keys_sent "$dir")" ] || fail "reconcile must send no keys, sent: $(keys_sent "$dir")"
+  [ -z "$(killed "$dir")" ] || fail "a successful rebuild must remove nothing, killed: $(killed "$dir")"
+  pass "fm-control reconcile: a vanished endpoint is rebuilt in the recorded worktree with no agent launched"
+}
+
+test_reconcile_rebuilds_the_whole_host() {
+  local dir out rc
+  dir=$(new_case reconcile-host)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  # The observed incident: the session hosting the fleet went with the terminal.
+  : > "$dir/fake/sessions"
+  out=$(run_control "$dir" t1 reconcile); rc=$?
+  expect_code 0 "$rc" "a task whose whole host died should reconcile"$'\n'"$out"
+  case "$(created "$dir")" in
+    *"new-session fmses"*) : ;;
+    *) fail "the rebuild should recreate the recorded session, got: $(created "$dir")" ;;
+  esac
+  pass "fm-control reconcile: the recorded session is recreated when the whole host is gone"
+}
+
+test_reconcile_refuses_a_label_living_elsewhere() {
+  local dir out rc
+  dir=$(new_case reconcile-sighted)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  # A renamed session leaves the recorded target unresolvable while the agent
+  # runs on. Rebuilding then would put a second agent on one worktree.
+  printf 'renamed:fm-t1\n' > "$dir/fake/sightings"
+  out=$(run_control "$dir" t1 reconcile); rc=$?
+  expect_code 1 "$rc" "a label still live elsewhere should refuse"
+  assert_contains "$out" "renamed:fm-t1" "the refusal should name where the endpoint actually is"
+  assert_contains "$out" "second agent" "the refusal should name the consequence it prevents"
+  [ -z "$(created "$dir")" ] || fail "a refused reconcile must create nothing, created: $(created "$dir")"
+  pass "fm-control reconcile: a task label still live under another name refuses instead of duplicating the agent"
+}
+
+test_reconcile_refuses_an_unreadable_host() {
+  local dir out rc
+  dir=$(new_case reconcile-unreadable)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  out=$(FM_FAKE_LIST_ALL=unreadable run_control "$dir" t1 reconcile); rc=$?
+  expect_code 1 "$rc" "an unreadable host inventory should refuse"
+  assert_contains "$out" "could not be read" "the refusal should say the host could not be read"
+  [ -z "$(created "$dir")" ] || fail "a refused reconcile must create nothing, created: $(created "$dir")"
+  # An absent server is different: nothing can be running on a server that is
+  # not there, so it is an authoritative zero rather than an unreadable one.
+  dir=$(new_case reconcile-noserver)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  : > "$dir/fake/sessions"
+  out=$(FM_FAKE_LIST_ALL=no-server run_control "$dir" t1 reconcile); rc=$?
+  expect_code 0 "$rc" "a definitively absent server should reconcile"$'\n'"$out"
+  pass "fm-control reconcile: an unreadable host refuses while a definitively absent one is an authoritative zero"
+}
+
+test_reconcile_refuses_an_unattributed_endpoint() {
+  local dir out rc
+  dir=$(new_case reconcile-ambiguous)
+  add_task "$dir" t1 claude
+  alive_as "$dir" some-unknown-process
+  out=$(run_control "$dir" t1 reconcile); rc=$?
+  expect_code 1 "$rc" "an ambiguous endpoint should refuse"
+  assert_contains "$out" "authoritative absence" \
+    "the refusal should say only a proven absence is rebuilt"
+  [ -z "$(created "$dir")" ] || fail "a refused reconcile must create nothing, created: $(created "$dir")"
+  pass "fm-control reconcile: only an authoritative absence is rebuilt, never an unattributed endpoint"
+}
+
+test_reconcile_reports_an_endpoint_that_already_exists() {
+  local dir out rc
+  dir=$(new_case reconcile-present)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 reconcile); rc=$?
+  expect_code 0 "$rc" "reconciling a live endpoint should report it, not act"$'\n'"$out"
+  assert_contains "$out" "agent=alive" "the outcome should say the agent is running"
+  assert_contains "$out" "nothing to reconcile" "the outcome should say there is nothing to do"
+  [ -z "$(created "$dir")" ] || fail "a live endpoint must not be rebuilt, created: $(created "$dir")"
+
+  dir=$(new_case reconcile-idempotent)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 reconcile); rc=$?
+  expect_code 0 "$rc" "reconciling an agent-free endpoint should be idempotent success"$'\n'"$out"
+  assert_contains "$out" "already reconciled" "the outcome should say it was already reconciled"
+  [ -z "$(created "$dir")" ] || fail "an existing endpoint must not be rebuilt, created: $(created "$dir")"
+  pass "fm-control reconcile: an endpoint that already exists is reported, never replaced"
+}
+
+test_reconcile_names_the_relaunch_refusal_a_wrong_directory_causes() {
+  local dir out rc
+  dir=$(new_case reconcile-wrongdir)
+  add_task "$dir" t1 claude
+  alive_as "$dir" zsh
+  printf '%s' /somewhere/else > "$dir/fake/cwd"
+  out=$(run_control "$dir" t1 reconcile); rc=$?
+  expect_code 1 "$rc" "an agent-free endpoint in the wrong directory should refuse"
+  assert_contains "$out" "/somewhere/else" "the refusal should name where the endpoint actually is"
+  assert_contains "$out" "relaunch will refuse" \
+    "the refusal should name the refusal it would otherwise cause"
+  pass "fm-control reconcile: an existing endpoint in the wrong copy names the relaunch refusal instead of reporting it fine"
+}
+
+test_reconcile_removes_a_rebuild_that_came_up_wrong() {
+  local dir out rc
+  dir=$(new_case reconcile-rollback)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  # A login profile that cd's away leaves the rebuilt pane outside the copy
+  # holding the work - exactly what the launch owner's worktree guard catches.
+  out=$(FM_FAKE_REBUILD_CWD=/elsewhere run_control "$dir" t1 reconcile); rc=$?
+  expect_code 1 "$rc" "a rebuild that came up in the wrong directory should refuse"
+  assert_contains "$out" "/elsewhere" "the refusal should name where it came up"
+  assert_contains "$out" "was removed" "the refusal should say the endpoint it created was removed"
+  case "$(killed "$dir")" in
+    @*) : ;;
+    *) fail "the rollback should remove the created window by its stable id, killed: $(killed "$dir")" ;;
+  esac
+  pass "fm-control reconcile: a rebuild that settles outside the recorded worktree is removed rather than left behind"
+}
+
+test_reconcile_refuses_a_worktree_something_still_holds() {
+  local dir out rc fb
+  dir=$(new_case reconcile-holder)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  fb="$dir/fakebin"
+  # The second, independent read on "is anything still running for this task":
+  # a live process holding the recorded copy.
+  cat > "$fb/lsof" <<'SH'
+#!/usr/bin/env bash
+case "${FM_FAKE_LSOF:-none}" in
+  holder) printf 'COMMAND PID USER\nnode 4242 captain\n'; exit 0 ;;
+  broken) printf 'lsof: internal error\n' >&2; exit 4 ;;
+esac
+exit 1
+SH
+  chmod +x "$fb/lsof"
+  out=$(FM_FAKE_LSOF=holder run_control "$dir" t1 reconcile); rc=$?
+  expect_code 1 "$rc" "a worktree something still holds should refuse"
+  assert_contains "$out" "still holds" "the refusal should name the held copy"
+  [ -z "$(created "$dir")" ] || fail "a refused reconcile must create nothing, created: $(created "$dir")"
+  out=$(FM_FAKE_LSOF=broken run_control "$dir" t1 reconcile); rc=$?
+  expect_code 1 "$rc" "an unreadable holder check should refuse"
+  assert_contains "$out" "could not be read" "the refusal should say the holder check could not be read"
+  [ -z "$(created "$dir")" ] || fail "a refused reconcile must create nothing, created: $(created "$dir")"
+  # Provably free is the only reading that proceeds.
+  out=$(FM_FAKE_LSOF=none run_control "$dir" t1 reconcile); rc=$?
+  expect_code 0 "$rc" "a provably free worktree should reconcile"$'\n'"$out"
+  assert_contains "$out" "worktree-holders=none" "the outcome should record what the holder check proved"
+  pass "fm-control reconcile: a worktree a live process still holds refuses, and an unreadable check never reads as free"
+}
+
+# make_path_without_lsof: a curated PATH carrying the tools the control plane
+# needs and no lsof, mirroring tests/fm-teardown.test.sh's helper of the same
+# name. The fake session provider is prepended by the caller.
+make_path_without_lsof() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
+test_reconcile_discloses_an_unavailable_holder_check() {
+  local dir out rc path_dir
+  dir=$(new_case reconcile-nolsof)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  path_dir=$(make_path_without_lsof "$dir")
+  # A missing holder-check tool must not recreate the dead end this verb exists
+  # to open: the endpoint proofs are the load-bearing ones, so the rebuild
+  # proceeds and says exactly what went unchecked.
+  out=$(env PATH="$dir/fakebin:$path_dir" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_RECONCILE_WAIT=0.05 \
+    "$CONTROL" t1 reconcile 2>&1); rc=$?
+  expect_code 0 "$rc" "a reconcile with no holder check available should still rebuild"$'\n'"$out"
+  assert_contains "$out" "reconciled t1" "the endpoint should be rebuilt"
+  assert_contains "$out" "worktree-holders=unchecked" \
+    "the outcome should disclose that the holder check could not run"
+  pass "fm-control reconcile: an unavailable holder check is disclosed, never silently reported as proof"
+}
+
+test_reconcile_refuses_a_backend_it_cannot_reconstruct() {
+  local dir out rc
+  dir=$(new_case reconcile-herdr)
+  add_task "$dir" t1 claude ship herdr "hsession:pane-1"
+  {
+    echo "herdr_session=hsession"
+    echo "herdr_workspace_id=ws-1"
+    echo "herdr_tab_id=tab-1"
+    echo "herdr_pane_id=pane-1"
+  } >> "$dir/home/state/t1.meta"
+  out=$(run_control "$dir" t1 reconcile); rc=$?
+  expect_code 1 "$rc" "a backend whose endpoint identity cannot be reconstructed should refuse"
+  assert_contains "$out" "runtime ids" "the refusal should name why the record is not enough"
+  [ -z "$(created "$dir")" ] || fail "a refused reconcile must create nothing, created: $(created "$dir")"
+  pass "fm-control reconcile: a backend whose endpoint identity is not in the task record refuses by name"
+}
+
+test_missing_endpoint_refusals_name_the_way_out() {
+  local dir out rc
+  dir=$(new_case reconcile-circle)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit on a missing endpoint should refuse"
+  assert_contains "$out" "bin/fm-control.sh t1 reconcile" \
+    "the exit refusal should name the command that rebuilds the endpoint"
+  pass "fm-control exit: a vanished endpoint's refusal names the command that ends the dead end"
+}
+
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once
@@ -908,3 +1247,16 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+test_reconcile_rebuilds_a_vanished_endpoint
+test_reconcile_rebuilds_the_whole_host
+test_reconcile_refuses_a_label_living_elsewhere
+test_reconcile_refuses_an_unreadable_host
+test_reconcile_refuses_an_unattributed_endpoint
+test_reconcile_reports_an_endpoint_that_already_exists
+test_reconcile_names_the_relaunch_refusal_a_wrong_directory_causes
+test_reconcile_removes_a_rebuild_that_came_up_wrong
+test_reconcile_refuses_a_backend_it_cannot_reconstruct
+test_missing_endpoint_refusals_name_the_way_out
+test_endpoint_rebuildable_backends_are_exactly_tmux
+test_reconcile_refuses_a_worktree_something_still_holds
+test_reconcile_discloses_an_unavailable_holder_check

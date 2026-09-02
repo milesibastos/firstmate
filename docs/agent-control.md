@@ -15,13 +15,13 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, with no side effects, so it can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `exit`, `relaunch`, `reconcile`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
   These were previously carried only in the [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) skill's tool references, which now point here.
   `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
-- **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
+- **Per-backend capability**: which named keys a runtime backend can deliver, whether it has a recovery-grade agent-state classifier able to prove an agent stopped, and whether its endpoint identity lives in the task record completely enough to rebuild.
 
 A recorded `harness=` is not always an exact adapter name: a task launched from a raw command records that command's basename instead.
 `fm_control_harness_family` is the one place that prefix rule is stated, and an unrecognized value resolves to no adapter rather than being guessed into one.
@@ -33,6 +33,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. |
 | `relaunch` | Replace the running agent with a new one in the same endpoint and worktree, on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the recorded endpoint, and the durable record names the harness that is actually running. |
+| `reconcile` | Rebuild an endpoint that is provably gone, from the task's own record. It launches no agent and writes no metadata. | The recorded endpoint exists again, classifies agent-free, and its shell is in the recorded worktree - or the endpoint it just created is removed. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
@@ -80,6 +81,36 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 
+## Reconciling an endpoint whose host died
+
+`missing` means the recorded endpoint is authoritatively absent, and every agent-facing verb refuses on it, because a target this home cannot resolve might still be alive elsewhere.
+What was missing was a way out of that state.
+When a terminal session hosting the fleet dies it takes every task's endpoint with it at once, and each guard then pointed at another: `exit` had no agent to stop, `relaunch` runs through `exit`, and `fm-spawn --relaunch` asked for the agent to be stopped first.
+
+`reconcile` is the transition that ends that, and it deliberately adds one rather than loosening any of those guards.
+It rebuilds the recorded endpoint and stops.
+The endpoint returns to `dead`, the ordinary stop-and-relaunch path applies unchanged, and the replacement agent still has to satisfy every check it always did - including the worktree guard, which is the one standing between a recovery and an agent running in the wrong copy.
+
+Before rebuilding anything it establishes four things:
+
+1. The recovery-grade classifier reports `missing`.
+   An `ambiguous` or `unreadable` endpoint is not a proven absence and refuses.
+2. No endpoint anywhere on the host carries this task's label.
+   This is the independent proof and the one that matters: a renamed session leaves the recorded target unresolvable while its agent runs on, so rebuilding then would put a second agent on one worktree.
+   A definitively absent host is an authoritative zero; an unreadable inventory refuses.
+3. The recorded worktree passes the same checkpoint a relaunch runs.
+4. No live process holds that worktree.
+   A held worktree and an unreadable holder check both refuse; where the holder check is unavailable the outcome discloses that it went unchecked rather than implying it passed, because the endpoint proofs are the load-bearing ones and a missing tool must not recreate the dead end this verb exists to open.
+
+The rebuilt endpoint is then confirmed to resolve, to settle agent-free, and to have come up in the recorded worktree; if any of that fails, the endpoint just created is removed by its exact window id rather than left behind.
+A brand-new pane is not agent-free the instant it exists - macOS runs `login` before it execs the shell - so the agent-free verdict is the settled one.
+
+An endpoint that already exists is reported rather than replaced, and an existing agent-free endpoint sitting in the wrong directory is reported with the relaunch refusal it would otherwise cause, so those two refusals name each other instead of leaving the operator holding both.
+
+Only tmux implements the rebuild.
+Its endpoint identity is the recorded session and window name, so the task record holds everything a reconstruction needs.
+Herdr classifies agent state but records opaque runtime workspace, tab, and pane ids, so rebuilding one would have to republish that record in the same transaction - a different mechanism, and unverified - and it is refused by name.
+
 ## Fail-closed boundaries
 
 - Targeting is exact.
@@ -99,24 +130,27 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free and its shell is sitting in the recorded worktree, so a replacement can never join a live agent or start outside the copy holding the work.
+  A `missing` endpoint is refused by that same guard, but named for what it is: there is no agent to stop, so the refusal points at `reconcile` rather than at `exit`.
+- `reconcile` rebuilds only a proven absence, only where the task record holds the endpoint's whole identity, and never launches an agent - the guards above still decide whether one may start.
 
 ## Capability matrix
 
 Backend capability comes from each adapter's real surface, not from a policy choice.
 
-| Backend | Escape | Enter | Ctrl+C | Ctrl+U | Recovery-grade agent state |
-| --- | --- | --- | --- | --- | --- |
-| tmux | yes | yes | yes | yes | yes |
-| herdr | yes | yes | yes | yes | yes |
-| zellij | yes | yes | yes | yes | no |
-| cmux | yes | yes | yes | yes | no |
-| orca | no | yes | yes | no | no |
+| Backend | Escape | Enter | Ctrl+C | Ctrl+U | Recovery-grade agent state | Endpoint rebuildable from the record |
+| --- | --- | --- | --- | --- | --- | --- |
+| tmux | yes | yes | yes | yes | yes | yes |
+| herdr | yes | yes | yes | yes | yes | no |
+| zellij | yes | yes | yes | yes | no | no |
+| cmux | yes | yes | yes | yes | no | no |
+| orca | no | yes | yes | no | no | no |
 
 Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.
 
 ## Verification
 
-- `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
+- `tests/fm-control.test.sh` - the adapter contract for every verified harness, the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, the reconcile decisions and their refusals, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-backend-tmux-smoke.test.sh` - the endpoint rebuild and label sightings against a real tmux server, including a task whose whole session died and a server that is gone entirely.

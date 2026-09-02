@@ -65,6 +65,10 @@ Cursor is identified from its exact `cursor-agent` identity or versioned install
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.
 Run the real-harness guard after any harness upgrade and before trusting refreshed evidence.
 
+A `missing` verdict does not say the endpoint's host is still there.
+tmux is the one backend whose endpoint identity - a session and window name - lives entirely in the task record, so a task whose whole session died can have that endpoint rebuilt from the record and returned to `dead`.
+[`agent-control.md`](agent-control.md) owns that transition and what it must prove first.
+
 ### Composer, busy state, and delivery
 
 Agent liveness and composer safety are separate checks.
