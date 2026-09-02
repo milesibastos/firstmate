@@ -1096,7 +1096,7 @@ EOF
 }
 
 status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
-  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe blocked
+  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe blocked key
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     safe=false
@@ -1119,11 +1119,17 @@ $fully_presented
       # Holding the cursor re-presents this span's surface lines on a later drain
       # instead: a duplicate rather than a lost event, and it clears as soon as a
       # signal annotation presents that task in full through fully_presented.
-      # `needs-decision` and `blocked` are deliberately exempt. They are not
-      # printed here either, but OPEN DECISIONS is a standing surface that
-      # re-prints them on every drain until the fold proves them closed, so the
-      # cursor passing them loses nothing. A terminal event has no such standing
-      # surface: its one-shot presentation is the only one it ever gets.
+      # `needs-decision` and `blocked` lines are deliberately exempt only when
+      # they actually enter the OPEN DECISIONS fold (the same
+      # _fm_decision_key / _fm_decision_key_transition_allowed gate
+      # _fm_decision_fold_line applies). They are not printed here either,
+      # but OPEN DECISIONS is a standing surface that re-prints a folded
+      # decision on every drain until the fold proves it closed, so the
+      # cursor passing it loses nothing. A needs-decision/blocked line the
+      # fold itself skips (malformed key, or a reserved key whose note
+      # doesn't speak that namespace) has no such standing surface, so it is
+      # treated like any other terminal event: its one-shot presentation is
+      # the only one it ever gets.
       blocked=false
       while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
@@ -1131,7 +1137,12 @@ $fully_presented
             if status_line_is_unread_surface "$line"; then safe=true; continue; fi
             status_is_captain_relevant "$line" || continue
             case "$(status_line_verb "$line")" in
-              needs-decision|blocked) continue ;;
+              needs-decision|blocked)
+                if key=$(_fm_decision_key "$line") \
+                  && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
+                  continue
+                fi
+                ;;
             esac
             blocked=true
             break
