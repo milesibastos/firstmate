@@ -1387,6 +1387,54 @@ test_lock_recycled_pid_does_not_read_as_holder() {
   pass "a recycled pid does not read as the lock holder"
 }
 
+test_lock_identity_key_label_does_not_veto_a_held_lock() {
+  local dir state lockdir proc_root live current recorded other_key out
+  dir=$(make_case lock-identity-key-label)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  proc_root="$dir/proc"
+  # A REAL live process with a synthetic /proc entry, exactly like the
+  # recycled-pid case, so the ticks are deterministic and the pid stays alive.
+  sleep 30 &
+  live=$!
+  mkdir -p "$proc_root"
+  write_fake_proc_identity "$proc_root" "$live" 555444
+  current=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || fail "could not compute the fake holder identity"
+  case "$current" in
+    linux-starttime=*) other_key=proc-starttime ;;
+    proc-starttime=*) other_key=linux-starttime ;;
+    *) fail "fake /proc identity did not use a recognised key ('$current')" ;;
+  esac
+  # Record the OTHER key for the same ticks and cmdline: two processes on the
+  # same host can disagree on this label alone if their uname forks diverge.
+  recorded="$other_key=${current#*=}"
+  [ "$recorded" != "$current" ] \
+    || fail "swapped key label produced the same identity, so this case proves nothing"
+
+  mkdir "$lockdir"
+  printf '%s\n' "$live" > "$lockdir/pid"
+  printf '%s\n' "$recorded" > "$lockdir/pid-identity"
+
+  out=$(lock_acquire_probe "$state" "$lockdir" "" "$proc_root")
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "a live holder was stolen because its recorded identity carried the other key label: $out" ;;
+  esac
+  case "$out" in
+    *"held=$live"*) ;;
+    *) fail "live holder with a differing key label was not reported via FM_LOCK_HELD_PID: $out" ;;
+  esac
+  case "$out" in
+    *"proof=identity-start-only"*) ;;
+    *) fail "differing key label was not folded into the start-time-only verdict: $out" ;;
+  esac
+  pass "a recorded identity's key label alone does not veto a live holder with the same start time"
+}
+
 test_lock_stale_record_with_identity_and_no_process_is_reclaimed() {
   local dir state lockdir dead out
   dir=$(make_case lock-stale-identity)
@@ -1497,6 +1545,7 @@ test_lock_exec_replaced_holder_still_holds
 test_lock_steal_escalation_is_bounded
 test_lock_live_holder_is_not_stolen_when_idle
 test_lock_recycled_pid_does_not_read_as_holder
+test_lock_identity_key_label_does_not_veto_a_held_lock
 test_lock_stale_record_with_identity_and_no_process_is_reclaimed
 test_lock_unprovable_identity_is_not_stolen
 test_lock_without_recorded_identity_is_not_stolen

@@ -411,17 +411,22 @@ fm_lock_remove_stray_owner_link() {
 # Print the START-TIME half of an identity string produced by fm_pid_identity,
 # tagged with the form it came from, or fail when the string carries no usable
 # start time. Both forms fm_pid_identity emits are handled:
-#   "<key>=<ticks> cmdline-hex=<hex>"  -> "proc <key>=<ticks>"
+#   "<key>=<ticks> cmdline-hex=<hex>"  -> "proc <ticks>"
 #   "<lstart> <command>"               -> "ps <five lstart fields>"
 # This reads fm_pid_identity's existing output; it never changes what that
 # function emits, because identities recorded by already-running processes and
 # by locks already held in live homes must keep matching what new code computes.
+# <key> itself (linux-starttime vs proc-starttime) is dropped rather than
+# compared: it names which uname string produced the identity, not a fact
+# about the process, and two processes on the same host can disagree on it.
 fm_identity_start_component() {
   local identity=$1
   local -a fields
+  local token
   case "$identity" in
     proc-starttime=*|linux-starttime=*)
-      printf 'proc %s\n' "${identity%% *}"
+      token=${identity%% *}
+      printf 'proc %s\n' "${token#*=}"
       return 0
       ;;
   esac
