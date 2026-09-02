@@ -1549,6 +1549,53 @@ test_identity_predicate_separates_held_from_proved() {
   pass "the shared identity predicate separates not-disproved from proved"
 }
 
+# The shape every caller that records an identity for a process it just started
+# actually hits: the identity is taken the instant after the fork, so it
+# describes the pre-exec command, and the process then replaces that command
+# while continuing to be the same process. Recorded and re-read against a REAL
+# exec rather than a rewritten string, because the string fixture above can
+# only confirm the rule already written into it.
+#
+# This is what makes identity-start-only load-bearing rather than a curiosity:
+# a caller that demanded whole-identity equality here would fail to recognise
+# every process it had started itself.
+test_identity_survives_the_recorded_process_exec() {
+  local dir state child recorded out waited=0
+  dir=$(make_case identity-after-exec)
+  state="$dir/state"
+  mkdir -p "$state"
+  mkfifo "$dir/gate" || fail "could not create the exec gate"
+
+  # Ordering is the point: the child blocks before its exec, the identity is
+  # recorded while it is still bash, and only then is it released to exec.
+  bash -c 'read -r _ < "$0"; exec sleep 30' "$dir/gate" &
+  child=$!
+  recorded=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$child") \
+    || { printf 'go\n' > "$dir/gate"; kill "$child" 2>/dev/null || true; fail "no identity could be recorded for a just-started process"; }
+
+  printf 'go\n' > "$dir/gate"
+  while [ "$waited" -lt 100 ]; do
+    case "$(ps -p "$child" -o command= 2>/dev/null || true)" in *sleep*) break ;; esac
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  case "$(ps -p "$child" -o command= 2>/dev/null || true)" in
+    *sleep*) ;;
+    *) kill "$child" 2>/dev/null || true; fail "the fixture never reached its exec, so this case would pass vacuously" ;;
+  esac
+
+  out=$(identity_verdict_probe "$state" "$recorded" "$child")
+  kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+
+  case "$out" in
+    "rc=0 proof=identity proves=yes"|"rc=0 proof=identity-start-only proves=yes") ;;
+    *) fail "a process that exec'd after its identity was recorded was no longer proved: $out" ;;
+  esac
+
+  pass "a recorded identity still proves the process after it replaces its command"
+}
+
 test_lock_unprovable_identity_is_not_stolen() {
   local dir state lockdir holder fakebin no_proc probe out
   dir=$(make_case lock-unprovable-identity)
@@ -1641,6 +1688,7 @@ test_lock_recycled_pid_does_not_read_as_holder
 test_lock_identity_key_label_does_not_veto_a_held_lock
 test_lock_stale_record_with_identity_and_no_process_is_reclaimed
 test_identity_predicate_separates_held_from_proved
+test_identity_survives_the_recorded_process_exec
 test_lock_unprovable_identity_is_not_stolen
 test_lock_without_recorded_identity_is_not_stolen
 test_lock_empty_pid_uses_minimum_grace
