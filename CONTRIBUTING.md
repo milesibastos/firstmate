@@ -11,7 +11,8 @@ Pushing through it runs an AI-driven review/test/lint pipeline in an isolated wo
 
 A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and requires both the deterministic signature and a parseable structured attestation from no-mistakes v1.46.0 or newer.
 The attestation must bind to the current PR head commit and report the review, test, and document steps as completed, so a stale attestation, a missing `head_sha`, or a skipped required step fails.
-It evaluates every PR opening and body edit independently, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
+It evaluates every PR opening and body edit independently against the live PR body, reruns after head synchronization or reopening, and prevents a later edit from replacing an earlier pending compliance check.
+On a push to an already-open PR it waits for the pushed head's attestation to land before judging, reading both live rather than from the triggering event's snapshot; `bin/fm-pr-attestation-settle.sh`'s header owns the exact mechanics.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
 
 ## Workflow
