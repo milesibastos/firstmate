@@ -1,0 +1,59 @@
+fm-lock-identity-primitive-u1 — regression evidence
+Each case below runs the SAME test from the target commit (7e2ece6) against an
+older library commit, to show the failure the fix addresses actually reproduces
+pre-fix and is resolved post-fix (already confirmed green in the full
+tests/fm-watcher-lock.test.sh run on the target commit).
+
+=====================================================================
+CASE 1 — exec-replacement regression (start-time-only fix, commit 7e2ece6)
+Test: test_lock_exec_replaced_holder_still_holds
+Run against commit 2a9d2ef (whole-identity-string comparison, the version
+CI caught as broken): a live holder whose shell execs into its last command
+(same pid, same start time, new command — the `( acquire; cmd ) &` idiom used
+throughout this repo's own test suites) had its lock incorrectly stolen.
+---------------------------------------------------------------------
+not ok - a live holder whose shell was replaced by its last command had its lock stolen: rc=0 held= proof=mismatch recovered=87924 lockpid=87969
+
+On the target commit (7e2ece6), this same test passes:
+ok - a holder whose shell is replaced by its last command still holds its lock
+(verdict: rc=1, proof=identity-start-only — see full suite run below)
+
+=====================================================================
+CASE 2 — recycled pid read as holder (pre-feature base, commit 252cad7)
+Test: test_lock_recycled_pid_does_not_read_as_holder
+Run against commit 252cad7 (pid-liveness-only check, before this feature):
+a pid recycled by an unrelated process still reads as the original holder,
+suppressing recovery.
+---------------------------------------------------------------------
+not ok - a recycled pid still read as the lock holder and suppressed recovery: rc=1 held=89170 proof= recovered= lockpid=89170
+
+On the target commit, this test passes with proof=mismatch and the abandoned
+holder correctly recovered.
+
+=====================================================================
+CASE 3 — no identity recorded at acquisition (pre-feature base, commit 252cad7)
+Test: test_lock_records_holder_identity
+---------------------------------------------------------------------
+not ok - acquisition recorded no holder identity
+
+On the target commit, this test passes: fm_lock_prepare_owner now writes
+fm_pid_identity into the lock's pid-identity file.
+
+=====================================================================
+CASE 4 — steal-mutex holder-proof cross-contamination (commit c24910f,
+before the round-1 review fix in 2a9d2ef)
+Test: test_lock_live_steal_mutex_is_not_reclaimed
+Setup: primary lock has a dead-pid record; a separate live process holds the
+lock's .steal mutex. Expected: FM_LOCK_HOLDER_PROOF should describe the
+PRIMARY lock's (dead) holder, not the steal mutex's (live) holder.
+---------------------------------------------------------------------
+not ok - holder proof described the steal mutex's holder instead of the primary lock's dead pid: rc=1 held=999999 proof=identity lockpid=999999 stealpid=91552
+
+On the target commit, this test passes with proof=dead (correctly describing
+the primary lock's dead holder, not the live steal-mutex holder).
+
+=====================================================================
+Method: each case's test file was overlaid (as of the target commit) onto a
+read-only `git archive` export of the older commit, with the trailing bare
+test_* invocation lines stripped so only the single named test ran. No
+worktree files were modified for this comparison.
