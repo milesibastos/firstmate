@@ -94,17 +94,11 @@ write_origin_meta() {  # <home> <id> [kind]
     "spawn_gen=fixture-$id"
 }
 
-# Every test runs with the suite's own shell options: `set -u` and no errexit.
-# A test that flips errexit on - typically by "restoring" it with `set -e` after
-# a `set +e` borrowed from an errexit suite - silently changes every LATER test,
-# turning the first tolerated nonzero command into an abort that prints no
-# `not ok` line at all. That is indistinguishable from a flake by exit code
-# alone, so assert the invariant after each test and name the test that broke it.
+# Run each test through the shared errexit-leak guard in tests/lib.sh, which
+# owns why the invariant matters and what a leak costs the tests that follow.
 run_test() {  # <test-function>
   "$1"
-  case $- in
-    *e*) fail "errexit leaked out of $1: later tests would abort silently instead of reporting" ;;
-  esac
+  fm_test_assert_no_errexit_leak "$1"
 }
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation

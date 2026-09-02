@@ -219,7 +219,8 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|\
+    fm-test-errexit-guard.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -628,6 +629,7 @@ tests/fm-task-delivery.test.sh 5901
 tests/fm-task-inbox.test.sh 25137
 tests/fm-teardown-endpoint-safety.test.sh 4655
 tests/fm-teardown.test.sh 96597
+tests/fm-test-errexit-guard.test.sh 845
 tests/fm-test-fixture-cleanup.test.sh 897
 tests/fm-test-fixtures.test.sh 153
 tests/fm-test-isolation-proof.test.sh 2576

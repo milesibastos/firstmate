@@ -51,6 +51,25 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# fm_test_assert_no_errexit_leak <label>: refuse to continue when errexit is on.
+#
+# Every suite that sources this library runs its tests with errexit OFF, so each
+# test can tolerate a nonzero exit and report it through fail(). A test that
+# turns errexit on - typically by "restoring" it with `set -e` after a `set +e`
+# borrowed from an errexit suite - silently changes every LATER test in the
+# file: from that point the first deliberately tolerated nonzero command aborts
+# the run before it can reach fail(), so the suite prints no `not ok` line and
+# zero bytes of stderr, which exit code alone cannot tell apart from a flake.
+#
+# Call this where a test ends, so the diagnostic names the test that leaked
+# instead of leaving the next one to die without one. It reads live shell state
+# rather than source bytes, so it cannot pass vacuously.
+fm_test_assert_no_errexit_leak() {
+  case $- in
+    *e*) fail "errexit leaked out of $1: later tests would abort silently instead of reporting" ;;
+  esac
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
