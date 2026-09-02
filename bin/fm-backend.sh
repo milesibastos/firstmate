@@ -906,6 +906,56 @@ fm_backend_agent_alive() {  # <backend> <target>
   esac
 }
 
+# fm_backend_endpoint_sightings: every endpoint on <backend>'s host whose task
+# label is exactly <label>, one per line, for the recovery evidence a `missing`
+# verdict cannot supply on its own - a recorded target can be unresolvable while
+# its agent runs under another name. Zero output with a 0 return means the host
+# is readable and holds no such endpoint; a nonzero return means the inventory
+# could not be read, which is never proof of absence.
+fm_backend_endpoint_sightings() {  # <backend> <label>
+  local backend=$1 label=$2
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_label_sightings "$label" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_endpoint_rebuild: recreate a provably absent <target> with its pane
+# in <cwd>, recreating its containing host when that is what vanished. Prints
+# the rebuilt endpoint's stable handle. This is the one transition that turns a
+# `missing` endpoint back into a `dead` one; every guard that reads `dead`
+# stays exactly as strict as it was.
+#
+# Only tmux implements it. Herdr's endpoint identity is not a name but a
+# workspace, tab, and pane id recorded in the task's own metadata
+# (fm_backend_validate_task_endpoint), so rebuilding one would have to republish
+# three new ids into that record - a different, unverified transaction. It
+# returns nonzero here rather than being guessed at.
+fm_backend_endpoint_rebuild() {  # <backend> <target> <cwd>
+  local backend=$1 target=$2 cwd=$3
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_endpoint_rebuild "$target" "$cwd" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_backend_endpoint_cwd: the directory <target>'s shell is sitting in, empty
+# on any read failure. This is the recovery path's confirmation that a rebuilt
+# endpoint really came up in the copy holding the task's work; it is defined for
+# exactly the backends fm_backend_endpoint_rebuild can rebuild. bin/fm-spawn.sh
+# keeps its own spawn-time reader because several adapters need the task label
+# to resolve a pane at spawn time, which no rebuildable backend does.
+fm_backend_endpoint_cwd() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_backend_tmux_current_path "$target" ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- native event push (backend-extensible) ---------------------------------
 #
 # The watcher's event-wait splice (bin/fm-watch.sh) is backend-agnostic: it asks

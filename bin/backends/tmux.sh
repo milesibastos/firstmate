@@ -124,9 +124,20 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 # fm_backend_tmux_kill: remove one explicitly named task window, best-effort.
 # Empty, omitted, and malformed targets return nonzero before invoking tmux so
 # tmux can never interpret an empty target as the caller's current window.
+# A stable window id (@N) is accepted alongside session:window: it addresses one
+# exact window with no name resolution at all, which is what a caller that just
+# created a window and must undo it needs (bin/fm-control.sh's reconcile
+# rollback).
 fm_backend_tmux_kill() {  # <target>
   local target=${1:-} session window
   case "$target" in
+    @[0-9]*)
+      case "${target#@}" in
+        ''|*[!0-9]*) return 1 ;;
+      esac
+      tmux kill-window -t "$target" 2>/dev/null || true
+      return 0
+      ;;
     *:*)
       session=${target%%:*}
       window=${target#*:}
@@ -354,4 +365,94 @@ fm_backend_tmux_agent_alive() {  # <target>
     dead|missing) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac
+}
+
+# --- endpoint-host recovery -------------------------------------------------
+#
+# A `missing` verdict says the recorded endpoint is not there; it does NOT say
+# the endpoint's HOST is gone. When a whole tmux session dies (a firstmate
+# session restart taking its server with it), every task's recorded window
+# vanishes at once and the control plane's stop-then-relaunch path has nothing
+# to act on: `exit` refuses because there is no agent to stop, and a relaunch
+# refuses because only a positively agent-free endpoint may be launched into.
+# The two functions below are the missing transition. They rebuild the recorded
+# endpoint so the ordinary `dead` path applies again, rather than relaxing what
+# `missing` means.
+
+# fm_backend_tmux_label_sightings: every session:window on the tmux SERVER whose
+# window name is exactly <window-name>, one per line. This is the independent
+# proof that a `missing` endpoint is not simply the same agent addressed by a
+# different name - a renamed session leaves the recorded target unresolvable
+# while its agent runs on, and rebuilding then would put a second agent on one
+# worktree. Returns 0 with no output when the server is definitively absent
+# (nothing can be running on a server that is not there) and nonzero when the
+# inventory could not be read at all, so an unreadable server never reads as
+# proof of absence.
+fm_backend_tmux_label_sightings() {  # <window-name>
+  local wname=$1 out status line
+  case "$wname" in ''|*:*) return 1 ;; esac
+  if out=$(LC_ALL=C tmux list-windows -a -F '#{session_name}:#{window_name}' 2>&1); then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
+    case "$out" in
+      *"no server running on "*|*"error connecting to "*" (No such file or directory)"|*"error connecting to "*" (Connection refused)")
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  # A tmux session name can contain neither ':' nor '.', so the first colon is
+  # always the session/window separator.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ "${line#*:}" = "$wname" ] || continue
+    printf '%s\n' "$line"
+  done <<EOF
+$out
+EOF
+}
+
+# fm_backend_tmux_endpoint_rebuild: recreate the recorded <target> with its pane
+# sitting in <cwd>, recreating the recorded SESSION too when the whole host is
+# gone. Prints the new window's stable id.
+#
+# Three things make this a reconstruction of the record rather than a new
+# endpoint. The recorded session name is used verbatim instead of
+# fm_backend_tmux_container_ensure's ambient one, so a firstmate now running
+# inside a different session cannot silently move the task's endpoint. Every
+# selector is exact-matched with tmux's '=' prefix, because tmux target
+# resolution is otherwise fuzzy and `firstmate` would happily resolve to
+# `firstmate-2`. And <cwd> is passed to new-window rather than assumed, so the
+# rebuilt pane is in the copy holding the task's work - which is what lets
+# fm-spawn's relaunch worktree guard stay exactly as strict as it is.
+#
+# An existing window with that name is refused rather than adopted: this
+# function only ever creates the endpoint its caller already proved absent.
+fm_backend_tmux_endpoint_rebuild() {  # <target> <cwd> -> prints window id
+  local target=$1 cwd=$2 session window wid
+  case "$target" in
+    *:*:*|'':*|*:'') return 1 ;;
+    *:*) ;;
+    *) return 1 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  # tmux rejects ':' and '.' in a session name, so a recorded value carrying
+  # either was never a session this rebuild could address.
+  case "$session" in *[!A-Za-z0-9_@%+-]*) return 1 ;; esac
+  case "$window" in ''|*[!A-Za-z0-9._@%+-]*) return 1 ;; esac
+  [ -n "$cwd" ] && [ -d "$cwd" ] || return 1
+  if ! tmux has-session -t "=$session" 2>/dev/null; then
+    tmux new-session -d -s "$session" || return 1
+  fi
+  if tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null | grep -qx "$window"; then
+    return 1
+  fi
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "=$session:" -n "$window" -c "$cwd") || return 1
+  tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
+  tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
+  printf '%s\n' "$wid"
 }
