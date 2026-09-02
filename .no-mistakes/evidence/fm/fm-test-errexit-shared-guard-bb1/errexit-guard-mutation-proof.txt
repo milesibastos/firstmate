@@ -1,0 +1,41 @@
+=== fm-test-errexit-guard.test.sh mutation proof ===
+Purpose: prove the guard test fails when pass() is unwired from
+fm_test_assert_no_errexit_leak, and passes cleanly when wired.
+
+--- (a) baseline run against unmodified tests/lib.sh ---
+$ bash tests/fm-test-errexit-guard.test.sh; echo "EXIT: $?"
+ok - a suite that leaves errexit off runs untouched
+ok - an injected errexit leak is refused and names the test that leaked it
+ok - a suite still on the allowlist keeps running while its leak is worked off
+ok - every allowlisted suite still exists
+EXIT: 0
+
+--- (b) mutate pass() in tests/lib.sh: remove the guard call ---
+$ sed -n "50,53p" tests/lib.sh   (before)
+pass() {
+  fm_test_assert_no_errexit_leak "$1"
+  printf 'ok - %s\n' "$1"
+}
+
+$ sed -n "50,52p" tests/lib.sh   (after mutation)
+pass() {
+  printf 'ok - %s\n' "$1"
+}
+
+$ bash tests/fm-test-errexit-guard.test.sh; echo "EXIT: $?"
+ok - a suite that leaves errexit off runs untouched
+not ok - an injected errexit leak was not refused
+EXIT: 1
+
+--- (c) restore tests/lib.sh and re-run against the real wiring ---
+$ git status --short tests/lib.sh   (expect empty)
+$ bash tests/fm-test-errexit-guard.test.sh; echo "EXIT: $?"
+ok - a suite that leaves errexit off runs untouched
+ok - an injected errexit leak is refused and names the test that leaked it
+ok - a suite still on the allowlist keeps running while its leak is worked off
+ok - every allowlisted suite still exists
+EXIT: 0
+
+--- final worktree check ---
+$ git status --short
+(clean)
