@@ -1,0 +1,32 @@
+Verification that the derived shard count and per-shard script counts described
+in docs/fm-test-portable-shards.md match what bin/fm-test-run.sh actually
+computes, on target commit 5153921f2e6e933275f0a65ea173e867377dc999.
+
+1) Coverage guard reports 7 serial shards, matching the CI matrix
+   [1, 2, 3, 4, 5, 6, 7] in .github/workflows/ci.yml:
+
+  $ bash bin/fm-test-run.sh --check-coverage
+  FM_TEST_COVERAGE ok total=177 parallel=24 serial=141 serial_shards=7 herdr=12
+
+2) Per-shard script counts via the real lane-listing consumer (--list --lane),
+   enumerating all seven portable-serial lanes end-to-end:
+
+  $ for i in 1 2 3 4 5 6 7; do
+      n=$(bash bin/fm-test-run.sh --list --lane portable-serial-${i}of7 | wc -l)
+      printf 'shard %s: %s scripts\n' "$i" "$n"
+    done
+
+  shard 1: 19 scripts
+  shard 2: 18 scripts
+  shard 3: 19 scripts
+  shard 4: 22 scripts
+  shard 5: 21 scripts
+  shard 6: 22 scripts
+  shard 7: 20 scripts
+
+  Sum: 141, matching serial=141 from --check-coverage above.
+
+This matches the "Script count" column of the measured-walls table in
+docs/fm-test-portable-shards.md exactly (19/18/19/22/21/22/20), including the
+shard 6/7 counts that the intent states were corrected (previously transposed)
+in commit 00f6481.

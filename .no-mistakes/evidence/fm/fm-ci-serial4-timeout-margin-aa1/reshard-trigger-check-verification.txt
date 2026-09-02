@@ -1,0 +1,42 @@
+Verification that the fixed re-shard trigger check command in
+docs/fm-test-portable-shards.md (the review-round-1 "reshard-trigger-glob-nesting"
+fix) actually works against real CI artifacts, and that its output matches the
+doc's "First measured" column for run 33585388230.
+
+Command executed exactly as documented (org/repo and run id substituted):
+
+  $ gh run download 33585388230 -R milesibastos/firstmate \
+      --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial-verify-check
+  $ for f in /tmp/fm-serial-verify-check/*/*.json; do
+      printf '%s %s min\n' \
+        "$(basename "$f" .json | sed 's/fm-test-timing-portable-//')" \
+        "$(jq -r '[.scripts[].duration_ms]|add/60000|.*10|round/10' "$f")"
+    done
+
+Output:
+
+  serial-1 8.9 min
+  serial-2 10.3 min
+  serial-3 6 min
+  serial-4 7.6 min
+  serial-5 7.5 min
+  serial-6 7.9 min
+  serial-7 8.4 min
+
+This matches docs/fm-test-portable-shards.md's "First measured" column exactly
+(1of7 8.9, 2of7 10.3, 3of7 6.0, 4of7 7.6, 5of7 7.5, 6of7 7.9, 7of7 8.4 min).
+
+Before the fix, gh run download nests each matched artifact in its own
+subdirectory (fm-test-timing-portable-serial-N/fm-test-timing-portable-serial-N.json),
+so the previously documented glob /tmp/fm-serial/*.json matched nothing and the
+command failed outright. The corrected nested glob /tmp/fm-serial/*/*.json
+resolves this, as shown above.
+
+Also verified the sibling hint-refresh recipe (same glob fix, second occurrence):
+
+  $ jq -r '.scripts[] | [.path, .duration_ms] | @tsv' \
+      /tmp/fm-serial-verify-check/*/*.json | LC_ALL=C sort | wc -l
+  141
+
+141 rows emitted, matching the doc's claim of 141 measured scripts across the
+seven shards.
