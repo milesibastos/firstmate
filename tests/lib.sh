@@ -48,7 +48,104 @@ fail() {
 }
 
 pass() {
+  fm_test_assert_no_errexit_leak "$1"
   printf 'ok - %s\n' "$1"
+}
+
+# fm_test_assert_no_errexit_leak <label>: refuse to continue when errexit is on.
+#
+# Every suite that sources this library runs its tests with errexit OFF, so each
+# test can tolerate a nonzero exit and report it through fail(). A test that
+# turns errexit on - typically by "restoring" it with `set -e` after a `set +e`
+# borrowed from an errexit suite - silently changes every LATER test in the
+# file: from that point the first deliberately tolerated nonzero command aborts
+# the run before it can reach fail(), so the suite prints no `not ok` line and
+# zero bytes of stderr, which exit code alone cannot tell apart from a flake.
+#
+# Call this where a test ends, so the diagnostic names the test that leaked
+# instead of leaving the next one to die without one. It reads live shell state
+# rather than source bytes, so it cannot pass vacuously.
+# Suites that still leak errexit, measured by running every suite with this
+# check in report mode rather than by matching source patterns. The number on
+# each entry is how many of that suite's tests currently run with errexit left
+# on, so the list carries its own progress and nobody has to re-measure to see
+# where the work stands. `unmeasured` means the suite stops early or is gated
+# off on the platform the count was taken on, so its leak is proven but its
+# extent is not; it still fires this check wherever the suite runs to completion.
+#
+# THIS LIST IS CLOSED TO ADDITIONS. It exists only so this check could land at
+# all while the suites that predate it are worked off one at a time. A suite
+# that is not named here - a new one, or a copy of one that is - must fail the
+# check. That is the entire point of the check, and it is the one property this
+# list must never be widened to soften.
+#
+# An entry is removed by FIXING the suite, never by silencing it: delete its
+# `set +e` / `set -e` pairs, because capturing `rc=$?` after a bare command
+# works identically without them, and then give every setup step the leaked
+# errexit had been silently enforcing an explicit `|| fail`, so a broken fixture
+# names the step that broke instead of surfacing as a confusing assertion
+# further down. Dropping the pairs without that second half trades a silent
+# abort for a silent skip. tests/fm-remote-job.test.sh is the worked example.
+FM_TEST_ERREXIT_LEAK_ALLOWLIST="
+fm-afk-pi-herdr-return-e2e.test.sh:unmeasured
+fm-afk-return.test.sh:6
+fm-backend-orca.test.sh:15
+fm-backlog-handoff.test.sh:15
+fm-bearings-board.test.sh:8
+fm-documentation-audiences.test.sh:3
+fm-fleet-sync.test.sh:8
+fm-on.test.sh:unmeasured
+fm-pr-check-security.test.sh:26
+fm-pr-merge.test.sh:61
+fm-public-followup.test.sh:15
+fm-remote-backlog-handoff.test.sh:unmeasured
+fm-remote-doctor.test.sh:13
+fm-remote-reply.test.sh:unmeasured
+fm-remote-secondmate-lifecycle-e2e.test.sh:unmeasured
+fm-review-diff.test.sh:1
+fm-secondmate-reconcile.test.sh:10
+fm-secondmate-safety.test.sh:24
+fm-startup-memory-budget.test.sh:3
+fm-stow-cascade.test.sh:6
+fm-teardown-endpoint-safety.test.sh:7
+fm-teardown.test.sh:58
+fm-test-isolation-proof.test.sh:8
+fm-test-run.test.sh:20
+fm-voice-relay.test.sh:37
+fm-wake-queue.test.sh:5
+"
+
+# fm_test_errexit_leak_allowlisted <suite-basename>: true while that suite is
+# still on the list above.
+fm_test_errexit_leak_allowlisted() {
+  local entry
+  local IFS=$' \t\n'
+  # Deliberate word splitting over the newline-separated list above.
+  # shellcheck disable=SC2086
+  for entry in $FM_TEST_ERREXIT_LEAK_ALLOWLIST; do
+    if [ "${entry%%:*}" = "$1" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+fm_test_assert_no_errexit_leak() {
+  local outermost suite
+  case $- in
+    *e*) ;;
+    *) return 0 ;;
+  esac
+  # The outermost entry is the suite itself, whether pass() was reached from the
+  # suite, one of its own functions, or a helper library it sourced. Only the
+  # basename is stable: the runner, a direct `bash tests/x.test.sh` and an
+  # absolute path all report a different prefix for the same suite.
+  outermost=${BASH_SOURCE[$((${#BASH_SOURCE[@]} - 1))]}
+  suite=${outermost##*/}
+  if fm_test_errexit_leak_allowlisted "$suite"; then
+    return 0
+  fi
+  fail "errexit leaked out of $1: later tests would abort silently instead of reporting"
 }
 
 # --- self-cleaning temp root ------------------------------------------------

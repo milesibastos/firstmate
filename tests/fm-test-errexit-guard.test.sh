@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Behavioral tests for the shared errexit-leak guard in tests/lib.sh.
+#
+# The guard exists because a suite that turns errexit on mid-run aborts on the
+# next deliberately tolerated nonzero command without reaching fail(), printing
+# no `not ok` line at all. A guard nobody proved can fire is worth nothing
+# against that, so every case here runs a real generated suite as a subprocess
+# and asserts the observable result: the clean one reports and exits 0, the
+# leaked one names the test that leaked and exits nonzero.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+TMP_ROOT=$(fm_test_tmproot fm-test-errexit-guard)
+
+# write_probe <path> <leak-statement>: a minimal suite in the shape every
+# firstmate suite uses - `set -u`, no errexit, source the library - whose single
+# test ends with <leak-statement> before the guard runs.
+write_probe() {  # <path> <leak-statement>
+  local path=$1 leak=$2
+  cat > "$path" <<PROBE
+#!/usr/bin/env bash
+set -u
+. "$ROOT/tests/lib.sh"
+
+sample_test() {
+  :
+  $leak
+}
+
+sample_test
+pass "sample_test"
+PROBE
+  chmod +x "$path"
+}
+
+# A suite that leaves errexit alone must be unaffected by the guard. Without
+# this case the guard could "pass" by refusing everything.
+write_probe "$TMP_ROOT/clean.sh" ':'
+clean_out=$(bash "$TMP_ROOT/clean.sh" 2> "$TMP_ROOT/clean.err")
+clean_rc=$?
+expect_code 0 "$clean_rc" "a suite that never touches errexit was refused by the guard"
+assert_contains "$clean_out" 'ok - sample_test' "the clean suite did not report its test"
+[ ! -s "$TMP_ROOT/clean.err" ] || fail "the clean suite produced unexpected diagnostics: $(cat "$TMP_ROOT/clean.err")"
+pass "a suite that leaves errexit off runs untouched"
+
+# The injected leak is the exact idiom the guard exists for: `set -e` left on at
+# the end of a test. The guard must refuse, and must name the test, because the
+# whole point is that the NEXT test would otherwise die anonymously.
+write_probe "$TMP_ROOT/leaked.sh" 'set -e'
+leaked_out=$(bash "$TMP_ROOT/leaked.sh" 2> "$TMP_ROOT/leaked.err")
+leaked_rc=$?
+[ "$leaked_rc" -ne 0 ] || fail "an injected errexit leak was not refused"
+assert_grep 'not ok - errexit leaked out of sample_test' "$TMP_ROOT/leaked.err" \
+  "the refusal did not name the test that leaked errexit"
+assert_not_contains "$leaked_out" 'ok - sample_test' \
+  "the leaking suite still reported its test as passing"
+pass "an injected errexit leak is refused and names the test that leaked it"
+
+# The allowlist is the only reason this check could land while suites that
+# predate it are still being fixed, so its bypass needs the same proof the
+# refusal got: a suite named on the list must leak WITHOUT being refused.
+# Take the name from the live list rather than hard-coding one, so removing an
+# entry cannot leave this test asserting against a name nobody carries any more.
+listed_suite=$(printf '%s\n' "$FM_TEST_ERREXIT_LEAK_ALLOWLIST" | awk 'NF { print; exit }')
+listed_suite=${listed_suite%%:*}
+if [ -n "$listed_suite" ]; then
+  write_probe "$TMP_ROOT/$listed_suite" 'set -e'
+  listed_out=$(bash "$TMP_ROOT/$listed_suite" 2> "$TMP_ROOT/listed.err")
+  listed_rc=$?
+  expect_code 0 "$listed_rc" "an allowlisted suite was refused for a leak it is still listed for"
+  assert_contains "$listed_out" 'ok - sample_test' "the allowlisted suite did not report its test"
+  assert_no_grep 'errexit leaked out of' "$TMP_ROOT/listed.err" \
+    "the allowlisted suite was still told its leak was fatal"
+  pass "a suite still on the allowlist keeps running while its leak is worked off"
+else
+  pass "the allowlist is empty, so every suite is held to the check"
+fi
+
+# The list is only meaningful while every name on it is a suite that exists. A
+# renamed or deleted suite must not leave an entry behind quietly protecting
+# nothing, because the list is the record of how much work is left.
+missing=
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  [ -f "$ROOT/tests/${entry%%:*}" ] || missing="$missing ${entry%%:*}"
+done <<ALLOWLIST
+$FM_TEST_ERREXIT_LEAK_ALLOWLIST
+ALLOWLIST
+[ -z "$missing" ] || fail "the errexit allowlist names suites that no longer exist:$missing"
+pass "every allowlisted suite still exists"
