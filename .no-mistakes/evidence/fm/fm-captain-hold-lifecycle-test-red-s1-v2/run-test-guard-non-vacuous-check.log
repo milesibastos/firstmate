@@ -1,0 +1,27 @@
+Manual check that the new `run_test` wrapper (tests/fm-captain-hold-lifecycle.test.sh)
+actually detects a leaked `set -e` rather than passing vacuously, per the
+change's claim: "it fires and names the guilty test."
+
+Reintroduced the exact pattern the fix removed into a scratch copy of the
+suite's first test (test_uninventoried_report_decision_refuses_completion):
+
+    -  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"
+    -  rc=$?
+    +  set +e
+    +  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err"
+    +  rc=$?
+    +  set -e
+
+Ran the patched copy (temporarily placed in tests/ so it could source
+tests/lib.sh, then deleted immediately after):
+
+$ bash tests/fm-captain-hold-lifecycle-LEAK-CHECK.test.sh
+ok - report-only unresolved captain call is reproduced and completion refuses before loss
+not ok - errexit leaked out of test_uninventoried_report_decision_refuses_completion: later tests would abort silently instead of reporting
+$ echo "exit: $?"
+exit: 1
+
+Result: the guard fires on the very next check after the leak is
+introduced, names the exact test function that leaked errexit, prints a
+`not ok` line, and the run exits 1 instead of continuing silently. This
+confirms the guard is not vacuous.
