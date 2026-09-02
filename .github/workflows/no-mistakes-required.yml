@@ -9,11 +9,15 @@ on:
 
 permissions:
   contents: read
+  # Read the judged PR body and head live at run time rather than from the
+  # frozen event payload. See bin/fm-pr-attestation-settle.sh.
+  pull-requests: read
 
 # GitHub concurrency groups retain at most one pending run, replacing older
 # pending runs even when cancel-in-progress is false. Give body-bearing events
 # an immutable per-event group so first-time-fork approvals can never collapse
-# opened/edited checks. Keep synchronize/reopened coalescing as before.
+# opened/edited checks. Keep synchronize/reopened coalescing as before: a
+# further push supersedes a synchronize run still waiting for its attestation.
 concurrency:
   group: no-mistakes-required-${{ github.event.pull_request.number }}-${{ (github.event.action == 'opened' || github.event.action == 'edited') && github.run_id || 'head-change' }}
   cancel-in-progress: true
@@ -22,9 +26,38 @@ jobs:
   check:
     name: PR must be raised via no-mistakes
     runs-on: ubuntu-latest
+    # Backstop only: the wait below bounds itself. This keeps a hung live read
+    # from holding a runner for the six-hour default.
+    timeout-minutes: 35
     if: >-
       github.event.pull_request.user.login != 'github-actions[bot]' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      # The event payload pairs the just-pushed head with the body as it stood
+      # before that push, so a synchronize run judged a moment that had already
+      # passed and left a permanent red the later passing run never supersedes.
+      # This resolves both facts from one live read instead. It renders no
+      # verdict: the pair it hands over is judged by the action below exactly as
+      # before, and a genuinely stale attestation still fails.
+      - name: Resolve the live PR body and head
+        id: live
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_EVENT: ${{ github.event.action }}
+        run: |
+          set -eu
+          bin/fm-pr-attestation-settle.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$PR_NUMBER" \
+            --event "$PR_EVENT" \
+            --output "$GITHUB_OUTPUT"
       - name: Verify no-mistakes signature and pipeline attestation
         uses: kunchenguid/no-mistakes/.github/actions/require-no-mistakes@32d396ac0f29135daf7fcb9964aba9d5f4e796d6 # post-v1.57.1, untagged (action added in #819)
+        with:
+          pr-body: ${{ steps.live.outputs.body }}
+          pr-head-sha: ${{ steps.live.outputs.head_sha }}
