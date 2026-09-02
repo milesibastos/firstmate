@@ -1,0 +1,16 @@
+# Regression tests: fail on the unfixed watcher, pass on the fixed one
+
+tests/fm-watch-triage.test.sh, the two new functions only, run via a driver that
+overrides WATCH with the base-commit copy of bin/fm-watch.sh.
+
+```
+# WATCH=/Users/milesibastos/.no-mistakes/worktrees/7a4356ea2166/01M1H64B6DK1P4SS7W7ZJC070B/bin/fm-watch.sh
+ok - a still-declared wait behind an actively running step takes the bounded cadence, while the same undeclared pane still wedge-escalates
+ok - consecutive bounded rechecks of a declared wait accumulate and demand deep inspection at the threshold
+
+# WATCH=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/fm-test-phase.7MWgva/basebin/fm-watch.sh
+not ok - a declared wait behind an active run did not take the bounded pause cadence
+
+# WATCH=/var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/fm-test-phase.7MWgva/basebin/fm-watch.sh
+not ok - the bounded recheck did not fire on round 1: 
+```
