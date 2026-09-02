@@ -14,10 +14,8 @@ run_expect_failure() {
   local expected=$1
   shift
   local out rc
-  set +e
   out=$("$@" 2>&1)
   rc=$?
-  set -e
   [ "$rc" -ne 0 ] || fail "expected failure containing '$expected'"
   assert_contains "$out" "$expected" "failure did not explain '$expected'"
 }
@@ -79,7 +77,8 @@ test_duplicate_and_setup_classification_fail() {
 
 test_required_pointer_fails() {
   local missing_pointer="$TMP_ROOT/missing-pointer.json"
-  mutate_inventory "$INVENTORY" "$missing_pointer" missing-owner-pointer
+  mutate_inventory "$INVENTORY" "$missing_pointer" missing-owner-pointer \
+    || fail "the missing-owner-pointer inventory fixture could not be written"
   run_expect_failure "required owner pointer missing" \
     "$CHECK" --inventory "$missing_pointer"
   pass "required documentation owner pointers cannot silently disappear"
@@ -87,7 +86,8 @@ test_required_pointer_fails() {
 
 write_fixture_inventory() {
   local repo=$1
-  cat > "$repo/docs/documentation-audiences.json" <<'JSON'
+  cat > "$repo/docs/documentation-audiences.json" <<'JSON' \
+    || fail "the fixture inventory could not be written"
 {
   "version": 1,
   "scope": {"trackedPatterns": ["*.md", "*.mdx", "*.rst", "*.txt", "docs/examples/*"]},
@@ -109,12 +109,16 @@ JSON
 
 test_local_links_and_no_keyword_heuristic() {
   local repo="$TMP_ROOT/fixture"
-  mkdir -p "$repo/docs"
-  git -C "$repo" init -q
-  printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md)' > "$repo/README.md"
-  printf '%s\n' '# Setup' > "$repo/docs/setup.md"
-  printf '%s\n' '# Policy' > "$repo/docs/policy.md"
-  cat > "$repo/docs/evidence.md" <<'MD'
+  mkdir -p "$repo/docs" || fail "the link fixture repository could not be created"
+  git -C "$repo" init -q || fail "the link fixture repository could not be initialized"
+  printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md)' > "$repo/README.md" \
+    || fail "the fixture README could not be written"
+  printf '%s\n' '# Setup' > "$repo/docs/setup.md" \
+    || fail "the fixture setup page could not be written"
+  printf '%s\n' '# Policy' > "$repo/docs/policy.md" \
+    || fail "the fixture policy page could not be written"
+  cat > "$repo/docs/evidence.md" <<'MD' \
+    || fail "the fixture evidence page could not be written"
 # Incident verification on 2026-07-23
 
 ```sh
@@ -124,13 +128,13 @@ test_local_links_and_no_keyword_heuristic() {
 Observed version 1.2.3 on branch `fm/example`.
 MD
   write_fixture_inventory "$repo"
-  git -C "$repo" add README.md docs
+  git -C "$repo" add README.md docs || fail "the link fixture could not be staged"
   "$CHECK" --root "$repo" >/dev/null \
     || fail "structural checker rejected legitimate maintainer evidence prose"
 
   printf '%s\n' '[Setup](docs/setup.md) [Policy](docs/policy.md) [Broken](docs/missing.bin)' \
-    > "$repo/README.md"
-  git -C "$repo" add README.md
+    > "$repo/README.md" || fail "the broken-link README could not be written"
+  git -C "$repo" add README.md || fail "the broken-link README could not be staged"
   run_expect_failure "unresolved local link" "$CHECK" --root "$repo"
   pass "local links resolve while dates, versions, commands, and incident prose remain semantically reviewed"
 }

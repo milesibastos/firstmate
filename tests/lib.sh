@@ -86,13 +86,21 @@ pass() {
 # names the step that broke instead of surfacing as a confusing assertion
 # further down. Dropping the pairs without that second half trades a silent
 # abort for a silent skip. tests/fm-remote-job.test.sh is the worked example.
+#
+# A setup step that is a function called inside a command substitution
+# (`x=$(helper)`) needs its own internal `|| fail` first: `fail`'s `exit` only
+# ends that subshell, so the function's exit status is whatever its last
+# command left, and a caller's `|| fail` on the assignment cannot fire unless
+# the function's own last command reflects the failure. Add the check inside
+# the function, then keep the caller's check so a signalled failure actually
+# stops the test instead of continuing against a fixture that was never built.
+# `fm_fakebin` and tests/wake-helpers.sh's `make_case`/`make_fake_crew_state`
+# are the worked examples for that shape.
 FM_TEST_ERREXIT_LEAK_ALLOWLIST="
 fm-afk-pi-herdr-return-e2e.test.sh:unmeasured
-fm-afk-return.test.sh:6
 fm-backend-orca.test.sh:15
 fm-backlog-handoff.test.sh:15
 fm-bearings-board.test.sh:8
-fm-documentation-audiences.test.sh:3
 fm-fleet-sync.test.sh:8
 fm-on.test.sh:unmeasured
 fm-pr-check-security.test.sh:26
@@ -102,17 +110,13 @@ fm-remote-backlog-handoff.test.sh:unmeasured
 fm-remote-doctor.test.sh:13
 fm-remote-reply.test.sh:unmeasured
 fm-remote-secondmate-lifecycle-e2e.test.sh:unmeasured
-fm-review-diff.test.sh:1
 fm-secondmate-reconcile.test.sh:10
 fm-secondmate-safety.test.sh:24
-fm-startup-memory-budget.test.sh:3
-fm-stow-cascade.test.sh:6
 fm-teardown-endpoint-safety.test.sh:7
 fm-teardown.test.sh:58
 fm-test-isolation-proof.test.sh:8
 fm-test-run.test.sh:20
 fm-voice-relay.test.sh:37
-fm-wake-queue.test.sh:5
 "
 
 # fm_test_errexit_leak_allowlisted <suite-basename>: true while that suite is
@@ -260,7 +264,7 @@ fi
 
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
-  mkdir -p "$fakebin"
+  mkdir -p "$fakebin" || fail "the fake tool directory could not be created"
   printf '%s\n' "$fakebin"
 }
 

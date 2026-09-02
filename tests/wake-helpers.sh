@@ -57,8 +57,9 @@ make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
-  mkdir -p "$dir/state" "$fakebin"
-  cat > "$fakebin/tmux" <<'SH'
+  mkdir -p "$dir/state" "$fakebin" || fail "case fixture $name: directories could not be created"
+  cat > "$fakebin/tmux" <<'SH' \
+    || fail "case fixture $name: the fake tmux could not be written"
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = "list-windows" ]; then
@@ -99,8 +100,9 @@ if [ "${1:-}" = "display-message" ]; then
 fi
 exit 1
 SH
-  chmod +x "$fakebin/tmux"
-  make_fake_crew_state "$fakebin" >/dev/null
+  chmod +x "$fakebin/tmux" || fail "case fixture $name: the fake tmux could not be made executable"
+  make_fake_crew_state "$fakebin" >/dev/null \
+    || fail "case fixture $name: the fake crew-state reader could not be installed"
   printf '%s\n' "$dir"
 }
 
@@ -115,7 +117,8 @@ SH
 # safe default so a test that forgets to set one surfaces rather than absorbs.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
-  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+  cat > "$fakebin/fm-crew-state.sh" <<'SH' \
+    || fail "the fake crew-state reader could not be written"
 #!/usr/bin/env bash
 set -u
 id=${1:-}
@@ -125,7 +128,8 @@ val=${!var:-${FM_FAKE_CREW_STATE:-}}
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"
 exit 0
 SH
-  chmod +x "$fakebin/fm-crew-state.sh"
+  chmod +x "$fakebin/fm-crew-state.sh" \
+    || fail "the fake crew-state reader could not be made executable"
   printf '%s\n' "$fakebin/fm-crew-state.sh"
 }
 

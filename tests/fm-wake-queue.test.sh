@@ -20,7 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
 test_concurrent_append_and_drain() {
   local dir state out1 out2 pids i pid count unique malformed sequence generation
-  dir=$(make_case concurrent)
+  dir=$(make_case concurrent) || fail "the concurrent fixture could not be built"
   state="$dir/state"
   out1="$dir/drain-one.out"
   out2="$dir/drain-two.out"
@@ -55,7 +55,7 @@ test_concurrent_append_and_drain() {
 
 test_signal_catchup_without_running_watcher() {
   local dir state fakebin out drain_out drain_err status_file sequence generation
-  dir=$(make_case signal)
+  dir=$(make_case signal) || fail "the signal fixture could not be built"
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
@@ -87,7 +87,7 @@ test_signal_catchup_without_running_watcher() {
 
 test_stale_enqueue_before_suppressor() {
   local dir state fakebin out drain_out capture_file window key pane_hash
-  dir=$(make_case stale)
+  dir=$(make_case stale) || fail "the stale fixture could not be built"
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
@@ -121,7 +121,7 @@ test_stale_enqueue_before_suppressor() {
 # suppressor - so a watcher killed between the two never swallows the surfaced finish.
 test_not_working_stale_enqueue_before_suppressor() {
   local dir state fakebin out drain_out capture_file window key pane_hash
-  dir=$(make_case stale-stopped)
+  dir=$(make_case stale-stopped) || fail "the stale-stopped fixture could not be built"
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
@@ -155,7 +155,7 @@ test_not_working_stale_enqueue_before_suppressor() {
 
 test_check_output_is_queued() {
   local dir state fakebin out drain_out check_file
-  dir=$(make_case check)
+  dir=$(make_case check) || fail "the check fixture could not be built"
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
@@ -179,7 +179,7 @@ SH
 
 test_atomic_double_drain() {
   local dir state out1 out2 count1 count2 sequence generation leftover
-  dir=$(make_case double-drain)
+  dir=$(make_case double-drain) || fail "the double-drain fixture could not be built"
   state="$dir/state"
   out1="$dir/drain-one.out"
   out2="$dir/drain-two.out"
@@ -211,7 +211,7 @@ test_atomic_double_drain() {
 
 test_drain_dedupes_obvious_duplicates() {
   local dir state out count
-  dir=$(make_case dedupe)
+  dir=$(make_case dedupe) || fail "the dedupe fixture could not be built"
   state="$dir/state"
   out="$dir/drain.out"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "first heartbeat append failed"
@@ -233,7 +233,7 @@ test_drain_dedupes_obvious_duplicates() {
 # normal fire from a live watcher with a fresh beacon, so it never false-alarms.
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only() {
   local dir state sub fakebin out row_before row_after stall_count
-  dir=$(make_case secondmate-foreign-stall)
+  dir=$(make_case secondmate-foreign-stall) || fail "the secondmate-foreign-stall fixture could not be built"
   state="$dir/state"
   sub="$dir/secondmate"
   mkdir -p "$sub/state" "$sub/data" "$sub/bin"
@@ -315,7 +315,7 @@ SH
 
 test_secondmate_stall_marker_rejects_symlink() {
   local dir state sub fakebin marker outside expected
-  dir=$(make_case secondmate-stall-marker-symlink)
+  dir=$(make_case secondmate-stall-marker-symlink) || fail "the secondmate-stall-marker-symlink fixture could not be built"
   state="$dir/state"
   sub="$dir/secondmate"
   mkdir -p "$sub/state"
@@ -352,7 +352,7 @@ SH
 
 test_acknowledged_stall_publication_survives_pre_marker_crash() {
   local dir state sub fakebin out epoch row_before
-  dir=$(make_case secondmate-stall-crash)
+  dir=$(make_case secondmate-stall-crash) || fail "the secondmate-stall-crash fixture could not be built"
   state="$dir/state"
   sub="$dir/secondmate"
   mkdir -p "$sub/state" "$sub/data"
@@ -390,7 +390,7 @@ test_acknowledged_stall_publication_survives_pre_marker_crash() {
 
 test_empty_prefix_mate_preserves_other_mate_receipt() {
   local dir state empty stalled fakebin epoch row_before round
-  dir=$(make_case secondmate-prefix-receipt)
+  dir=$(make_case secondmate-prefix-receipt) || fail "the secondmate-prefix-receipt fixture could not be built"
   state="$dir/state"
   empty="$dir/ios"
   stalled="$dir/ios-ui"
@@ -435,7 +435,7 @@ test_empty_prefix_mate_preserves_other_mate_receipt() {
 
 test_drain_asserts_watcher_liveness() {
   local dir state err identity
-  dir=$(make_case drain-liveness)
+  dir=$(make_case drain-liveness) || fail "the drain-liveness fixture could not be built"
   state="$dir/state"
   err="$dir/drain.err"
   printf 'window=test:fm-x\nkind=ship\n' > "$state/x.meta"
@@ -460,7 +460,7 @@ test_drain_asserts_watcher_liveness() {
 
 test_structural_signal_enrichment_preserves_raw_rows() {
   local dir state out expected actual annotation_count outside perl_bin
-  dir=$(make_case enrichment)
+  dir=$(make_case enrichment) || fail "the enrichment fixture could not be built"
   state="$dir/state"
   out="$dir/drain.out"
   expected="$dir/expected.out"
@@ -518,7 +518,7 @@ SH
 
 test_enrichment_preserves_all_unread_lines_and_status_file_failures() {
   local dir state out i raw_count expected
-  dir=$(make_case complete-enrichment)
+  dir=$(make_case complete-enrichment) || fail "the complete-enrichment fixture could not be built"
   state="$dir/state"
   out="$dir/drain.out"
   awk 'BEGIN { printf "done: "; for (i = 0; i < 20000; i++) printf "x"; printf "\n" }' > "$state/huge.status"
@@ -574,7 +574,7 @@ wait_for_file_text() {  # <file> <fixed-text>
 
 test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
   local dir state out1 out2 pid
-  dir=$(make_case slow-annotation)
+  dir=$(make_case slow-annotation) || fail "the slow-annotation fixture could not be built"
   state="$dir/state"
   out1="$dir/drain-one.out"
   out2="$dir/drain-two.out"
@@ -608,7 +608,7 @@ test_slow_annotation_does_not_block_append_and_deleted_file_fails_open() {
 # what the actor presents or acks itself. Do not regress it.
 test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
   local dir state out err sequence generation count
-  dir=$(make_case actor-scope)
+  dir=$(make_case actor-scope) || fail "the actor-scope fixture could not be built"
   state="$dir/state"
 
   append_wake "$state" check "some-poll.check.sh" "check: some-poll.check.sh: merged" \
@@ -666,7 +666,7 @@ test_branch_actor_scoped_ack_never_swallows_a_main_owned_row() {
 
 test_main_drain_excludes_rows_already_granted_to_branch() {
   local dir state out err sequence generation
-  dir=$(make_case main-excludes-branch-grant)
+  dir=$(make_case main-excludes-branch-grant) || fail "the main-excludes-branch-grant fixture could not be built"
   state="$dir/state"
 
   append_wake "$state" check "some-poll.check.sh" "check: some-poll.check.sh: merged" \
@@ -705,7 +705,7 @@ test_main_drain_excludes_rows_already_granted_to_branch() {
 
 test_branch_grant_refuses_rows_already_claimed_by_main() {
   local dir state rc
-  dir=$(make_case branch-refuses-main-claim)
+  dir=$(make_case branch-refuses-main-claim) || fail "the branch-refuses-main-claim fixture could not be built"
   state="$dir/state"
 
   append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
@@ -724,7 +724,7 @@ test_branch_grant_refuses_rows_already_claimed_by_main() {
 
 test_actor_filter_precedes_same_key_deduplication() {
   local dir state main_sequence main_generation branch_sequence branch_generation
-  dir=$(make_case actor-dedup-order)
+  dir=$(make_case actor-dedup-order) || fail "the actor-dedup-order fixture could not be built"
   state="$dir/state"
 
   append_wake "$state" signal "task-a.status" "signal: branch version" || fail "branch row append failed"
@@ -755,7 +755,7 @@ test_actor_filter_precedes_same_key_deduplication() {
 
 test_main_reclaims_a_grant_whose_branch_owner_exited() {
   local dir state owner sequence generation
-  dir=$(make_case stale-branch-owner)
+  dir=$(make_case stale-branch-owner) || fail "the stale-branch-owner fixture could not be built"
   state="$dir/state"
 
   append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
@@ -791,7 +791,7 @@ test_main_reclaims_a_grant_whose_branch_owner_exited() {
 # acking nothing.
 test_branch_actor_without_eligible_snapshot_refuses() {
   local dir state
-  dir=$(make_case actor-no-snapshot)
+  dir=$(make_case actor-no-snapshot) || fail "the actor-no-snapshot fixture could not be built"
   state="$dir/state"
   append_wake "$state" signal "task-a.status" "signal: task-a" || fail "append failed"
   if FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" >/dev/null 2>"$dir/err"; then
@@ -804,12 +804,14 @@ test_branch_actor_without_eligible_snapshot_refuses() {
 
 test_wake_publish_requires_atomic_recovery_evidence() {
   local dir state fakebin real_mv rc out
-  dir=$(make_case wake-publish-recovery-evidence)
+  dir=$(make_case wake-publish-recovery-evidence) || fail "the wake-publish-recovery-evidence fixture could not be built"
   state="$dir/state"
   fakebin="$dir/fakebin"
   real_mv=$(command -v mv) || fail "could not locate mv for recovery publication fixture"
-  printf 'pending:handling:existing\n' > "$state/.watcher-down"
-  cat > "$fakebin/mv" <<'SH'
+  printf 'pending:handling:existing\n' > "$state/.watcher-down" \
+    || fail "the existing recovery evidence could not be written"
+  cat > "$fakebin/mv" <<'SH' \
+    || fail "the failing mv fixture could not be written"
 #!/usr/bin/env bash
 last=${!#}
 if [ "$last" = "${FM_TEST_PUBLISH_MARKER:-}" ]; then
@@ -817,13 +819,11 @@ if [ "$last" = "${FM_TEST_PUBLISH_MARKER:-}" ]; then
 fi
 exec "$FM_TEST_REAL_MV" "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/mv" || fail "the failing mv fixture could not be made executable"
 
-  set +e
   PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_PUBLISH_MARKER="$state/.watcher-down" \
     append_wake "$state" signal task.status "signal: publish failure"
   rc=$?
-  set -e
   [ "$rc" -ne 0 ] || fail "recovery publication failure allowed wake append to succeed"
   [ "$(cat "$state/.watcher-down")" = 'pending:handling:existing' ] \
     || fail "failed atomic publication erased existing recovery evidence"
@@ -843,10 +843,10 @@ SH
 
 test_legacy_generationless_wake_is_adopted() {
   local dir state row sequence generation
-  dir=$(make_case legacy-generationless-wake)
+  dir=$(make_case legacy-generationless-wake) || fail "the legacy-generationless-wake fixture could not be built"
   state="$dir/state"
   row=$(printf '1700000000\t7\tcheck\tlegacy-process-event\tcheck: legacy process-event')
-  printf '%s\n' "$row" > "$state/.wake-queue"
+  printf '%s\n' "$row" > "$state/.wake-queue" || fail "the legacy wake row could not be written"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/first.out" 2> "$dir/first.err" \
     || fail "generation-less legacy wake could not be adopted"
@@ -879,7 +879,7 @@ test_legacy_generationless_wake_is_adopted() {
 test_stale_recovery_generation_cannot_touch_a_newer_episode() {
   local dir state first_err replay_err sequence generation handling_marker
   local newer_marker newer_sequence newer_generation rc
-  dir=$(make_case stale-recovery-generation)
+  dir=$(make_case stale-recovery-generation) || fail "the stale-recovery-generation fixture could not be built"
   state="$dir/state"
 
   append_wake "$state" check first 'check: first generation' \
@@ -953,16 +953,18 @@ test_stale_recovery_generation_cannot_touch_a_newer_episode() {
 
 test_recovery_ack_failure_is_reported() {
   local dir state fakebin real_mv rc generation
-  dir=$(make_case recovery-ack-failure)
+  dir=$(make_case recovery-ack-failure) || fail "the recovery-ack-failure fixture could not be built"
   state="$dir/state"
   fakebin="$dir/fakebin"
   real_mv=$(command -v mv) || fail "could not locate mv for recovery acknowledgement fixture"
-  printf 'pending:handling:fixture\n' > "$state/.watcher-down"
+  printf 'pending:handling:fixture\n' > "$state/.watcher-down" \
+    || fail "the pending recovery marker could not be written"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/initial.out" 2> "$dir/initial.err" \
     || fail "initial recovery drain failed"
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through 0 --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/initial.err")
   [ -n "$generation" ] || fail "initial recovery drain omitted its generation"
-  cat > "$fakebin/mv" <<'SH'
+  cat > "$fakebin/mv" <<'SH' \
+    || fail "the failing mv fixture could not be written"
 #!/usr/bin/env bash
 last=${!#}
 if [ "$last" = "${FM_TEST_ACK_MARKER:-}" ]; then
@@ -970,14 +972,12 @@ if [ "$last" = "${FM_TEST_ACK_MARKER:-}" ]; then
 fi
 exec "$FM_TEST_REAL_MV" "$@"
 SH
-  chmod +x "$fakebin/mv"
+  chmod +x "$fakebin/mv" || fail "the failing mv fixture could not be made executable"
 
-  set +e
   PATH="$fakebin:$PATH" FM_TEST_REAL_MV="$real_mv" FM_TEST_ACK_MARKER="$state/.watcher-down" \
     FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 0 --recovery-generation "$generation" \
       > "$dir/drain.out" 2> "$dir/drain.err"
   rc=$?
-  set -e
   [ "$rc" -ne 0 ] || fail "recovery acknowledgement failure was reported as success"
   grep -F 'recovery episode could not be retired safely' "$dir/drain.err" >/dev/null \
     || fail "recovery acknowledgement failure had no explicit diagnostic"
@@ -996,13 +996,14 @@ SH
 
 test_interruption_before_and_after_raw_commit() {
   local dir state before_out after_out replay_out empty_out pid rc count i sequence generation
-  dir=$(make_case interruption)
+  dir=$(make_case interruption) || fail "the interruption fixture could not be built"
   state="$dir/state"
   before_out="$dir/before.out"
   after_out="$dir/after.out"
   replay_out="$dir/replay.out"
   empty_out="$dir/empty.out"
-  printf 'done: interruption fixture\n' > "$state/task.status"
+  printf 'done: interruption fixture\n' > "$state/task.status" \
+    || fail "the interruption status fixture could not be written"
   append_wake "$state" signal task.status "signal: task" || fail "pre-commit interruption wake append failed"
 
   FM_STATE_OVERRIDE="$state" FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT=5 "$DRAIN" > "$before_out" &
@@ -1014,10 +1015,8 @@ test_interruption_before_and_after_raw_commit() {
   done
   [ -e "$state/.wake-queue.lock" ] || { kill "$pid" 2>/dev/null || true; fail "pre-commit drain never entered its serialized read boundary"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain before raw commitment"
-  set +e
   wait "$pid"
   rc=$?
-  set -e
   [ "$rc" -ne 0 ] || fail "pre-commit interruption unexpectedly succeeded"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$replay_out" 2> "$dir/replay.err" || fail "restored pre-commit wake did not drain"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$replay_out")
@@ -1035,9 +1034,7 @@ test_interruption_before_and_after_raw_commit() {
   [ -s "$state/.wake-queue" ] \
     || { kill "$pid" 2>/dev/null || true; fail "post-commit drain consumed its raw row before handling acknowledgement"; }
   kill -TERM "$pid" 2>/dev/null || fail "could not interrupt drain after raw presentation"
-  set +e
-  wait "$pid"
-  set -e
+  wait "$pid" || true
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$empty_out" 2> "$dir/after-replay.err" \
     || fail "drain after post-presentation interruption failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$empty_out")
@@ -1058,7 +1055,7 @@ test_interruption_before_and_after_raw_commit() {
 # missing marker, a later different note - reads as wake-worthy.
 test_self_announced_append_guards() {
   local dir state status
-  dir=$(make_case self-announced-append)
+  dir=$(make_case self-announced-append) || fail "the self-announced-append fixture could not be built"
   state="$dir/state"
   status="$state/t.status"
 
@@ -1120,7 +1117,7 @@ test_self_announced_append_guards() {
 # live hold exactly as before.
 test_self_held_lock_reclaims_instead_of_deadlocking() {
   local dir state rc
-  dir=$(make_case self-held-lock)
+  dir=$(make_case self-held-lock) || fail "the self-held-lock fixture could not be built"
   state="$dir/state"
   rc=0
   FM_STATE_OVERRIDE="$state" bash -c '
@@ -1150,7 +1147,7 @@ test_self_held_lock_reclaims_instead_of_deadlocking() {
 # always annotated. Driven through the real drain executable.
 test_historical_annotation_skips_announced_status() {
   local dir state out err
-  dir=$(make_case historical-annotation)
+  dir=$(make_case historical-annotation) || fail "the historical-annotation fixture could not be built"
   state="$dir/state"
   out="$dir/drain.out"
   err="$dir/drain.err"

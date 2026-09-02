@@ -14,40 +14,48 @@ CONFIG_PUSH="$ROOT/bin/fm-config-push.sh"
 
 make_fake_toolchain() {
   local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  fm_fake_exit0 "$fakebin" node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
-  cat > "$fakebin/gh-axi" <<'SH'
+  fakebin=$(fm_fakebin "$dir") || fail "the fake tool directory could not be created"
+  fm_fake_exit0 "$fakebin" node chrome-devtools-axi \
+    || fail "the fake node and browser tools could not be written"
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46 \
+    || fail "the fake lavish-axi could not be written"
+  cat > "$fakebin/gh-axi" <<'SH' \
+    || fail "the fake gh-axi could not be written"
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' '0.1.29'
 fi
 exit 0
 SH
-  cat > "$fakebin/quota-axi" <<'SH'
+  cat > "$fakebin/quota-axi" <<'SH' \
+    || fail "the fake quota-axi could not be written"
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' 'quota-axi 0.1.29 (fake)'
 fi
 exit 0
 SH
-  cat > "$fakebin/gh" <<'SH'
+  cat > "$fakebin/gh" <<'SH' \
+    || fail "the fake gh could not be written"
 #!/usr/bin/env bash
 exit 0
 SH
-  cat > "$fakebin/treehouse" <<'SH'
+  cat > "$fakebin/treehouse" <<'SH' \
+    || fail "the fake treehouse could not be written"
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   printf '%s\n' 'Usage: treehouse get [--lease]'
 fi
 SH
-  cat > "$fakebin/no-mistakes" <<'SH'
+  cat > "$fakebin/no-mistakes" <<'SH' \
+    || fail "the fake no-mistakes could not be written"
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
   printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
 fi
 SH
-  cat > "$fakebin/tasks-axi" <<'SH'
+  cat > "$fakebin/tasks-axi" <<'SH' \
+    || fail "the fake tasks-axi could not be written"
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
   --version:*) printf '%s\n' '0.2.4' ;;
@@ -55,7 +63,8 @@ case "${1:-}:${2:-}" in
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
-  cat > "$fakebin/tmux" <<'SH'
+  cat > "$fakebin/tmux" <<'SH' \
+    || fail "the fake tmux could not be written"
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "$*" in
@@ -66,7 +75,7 @@ case "$*" in
 esac
 exit 0
 SH
-  chmod +x "$fakebin"/*
+  chmod +x "$fakebin"/* || fail "the fake tools could not be made executable"
   printf '%s\n' "$fakebin"
 }
 
@@ -97,7 +106,8 @@ test_primary_bootstrap_materializes_visible_default() {
   rec=$(new_bootstrap_world materialize)
   root=${rec%%|*}
   home=${rec#*|}
-  fakebin=$(make_fake_toolchain "$TMP_ROOT/materialize")
+  fakebin=$(make_fake_toolchain "$TMP_ROOT/materialize") \
+    || fail "the bootstrap toolchain could not be built"
 
   out=$(run_bootstrap "$root" "$home" "$fakebin")
   [ -z "$out" ] || fail "default materialization should stay quiet, got: $out"
@@ -122,10 +132,8 @@ test_primary_bootstrap_materializes_visible_default() {
 
 expect_rejected_read() {
   local home=$1 expected=$2 out rc
-  set +e
   out=$(FM_HOME="$home" "$BUDGET" read 2>&1)
   rc=$?
-  set -e
   [ "$rc" -ne 0 ] || fail "unsafe budget unexpectedly parsed: $expected"
   assert_contains "$out" "$expected" "unsafe budget rejection was not specific"
 }
@@ -133,34 +141,40 @@ expect_rejected_read() {
 test_safe_parser_rejects_ambiguous_and_unsafe_values() {
   local home outside
   home="$TMP_ROOT/parser-home"
-  mkdir -p "$home/config" "$home/data"
-  printf '42\n' > "$home/config/startup-memory-budget"
+  mkdir -p "$home/config" "$home/data" || fail "the parser home could not be created"
+  printf '42\n' > "$home/config/startup-memory-budget" || fail "the valid budget could not be written"
   [ "$(FM_HOME="$home" "$BUDGET" read)" = 42 ] || fail "valid positive decimal budget was rejected"
 
-  printf '0\n' > "$home/config/startup-memory-budget"
+  printf '0\n' > "$home/config/startup-memory-budget" || fail "the zero budget could not be written"
   expect_rejected_read "$home" 'value must be one positive decimal integer'
-  printf '42\nextra\n' > "$home/config/startup-memory-budget"
+  printf '42\nextra\n' > "$home/config/startup-memory-budget" \
+    || fail "the multi-line budget could not be written"
   expect_rejected_read "$home" 'value must be one positive decimal integer'
-  printf '+42\n' > "$home/config/startup-memory-budget"
+  printf '+42\n' > "$home/config/startup-memory-budget" \
+    || fail "the signed budget could not be written"
   expect_rejected_read "$home" 'value must be one positive decimal integer'
 
   outside="$TMP_ROOT/parser-outside"
-  printf '77\n' > "$outside"
-  rm -f "$home/config/startup-memory-budget"
-  ln -s "$outside" "$home/config/startup-memory-budget"
+  printf '77\n' > "$outside" || fail "the external budget target could not be written"
+  rm -f "$home/config/startup-memory-budget" || fail "the budget file could not be removed"
+  ln -s "$outside" "$home/config/startup-memory-budget" \
+    || fail "the symlinked budget fixture could not be created"
   expect_rejected_read "$home" 'file is symlinked'
   [ "$(<"$outside")" = 77 ] || fail "symlink rejection changed its external target"
 
-  rm -f "$home/config/startup-memory-budget"
-  ln "$outside" "$home/config/startup-memory-budget"
+  rm -f "$home/config/startup-memory-budget" || fail "the symlinked budget could not be removed"
+  ln "$outside" "$home/config/startup-memory-budget" \
+    || fail "the hardlinked budget fixture could not be created"
   expect_rejected_read "$home" 'file is hardlinked'
   [ "$(<"$outside")" = 77 ] || fail "hardlink rejection changed its external source"
 
-  rm -f "$home/config/startup-memory-budget"
-  rm -rf "$home/config"
-  ln -s "$TMP_ROOT/parser-config-target" "$home/config"
-  mkdir -p "$TMP_ROOT/parser-config-target"
-  printf '88\n' > "$TMP_ROOT/parser-config-target/startup-memory-budget"
+  rm -f "$home/config/startup-memory-budget" || fail "the hardlinked budget could not be removed"
+  rm -rf "$home/config" || fail "the parser config directory could not be removed"
+  ln -s "$TMP_ROOT/parser-config-target" "$home/config" \
+    || fail "the symlinked config directory fixture could not be created"
+  mkdir -p "$TMP_ROOT/parser-config-target" || fail "the config symlink target could not be created"
+  printf '88\n' > "$TMP_ROOT/parser-config-target/startup-memory-budget" \
+    || fail "the budget behind the symlinked config directory could not be written"
   expect_rejected_read "$home" 'config directory is symlinked'
   pass "budget parser accepts one exact positive value and rejects malformed or unsafe inputs"
 }
@@ -168,12 +182,13 @@ test_safe_parser_rejects_ambiguous_and_unsafe_values() {
 test_budget_accounting_reports_all_three_files_and_safe_failure() {
   local home out rc outside
   home="$TMP_ROOT/accounting-home"
-  mkdir -p "$home/config" "$home/data"
-  printf '10\n' > "$home/config/startup-memory-budget"
-  printf 'abc\n' > "$home/data/captain.md"
-  printf 'abcdef\n' > "$home/data/captain-shared.md"
+  mkdir -p "$home/config" "$home/data" || fail "the accounting home could not be created"
+  printf '10\n' > "$home/config/startup-memory-budget" || fail "the accounting budget could not be written"
+  printf 'abc\n' > "$home/data/captain.md" || fail "the captain memory fixture could not be written"
+  printf 'abcdef\n' > "$home/data/captain-shared.md" \
+    || fail "the shared captain memory fixture could not be written"
 
-  out=$(FM_HOME="$home" "$BUDGET" report)
+  out=$(FM_HOME="$home" "$BUDGET" report) || fail "the accounting report failed on a safe home"
   assert_contains "$out" 'estimator=ceil(UTF-8 bytes / 3) conservative-local-estimate' \
     "report did not name the stable estimator"
   assert_contains "$out" 'file=data/captain.md bytes=4 estimated_tokens=2 status=present' \
@@ -185,18 +200,18 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
   assert_contains "$out" 'total_estimated_tokens=5' "report total was not the sum of all three files"
   assert_contains "$out" 'budget_status=within-budget' "report did not classify the initial total"
 
-  printf 'abcdefabcdefabcdefabcdef\n' > "$home/data/learnings.md"
-  out=$(FM_HOME="$home" "$BUDGET" report)
+  printf 'abcdefabcdefabcdefabcdef\n' > "$home/data/learnings.md" \
+    || fail "the learnings fixture could not be written"
+  out=$(FM_HOME="$home" "$BUDGET" report) || fail "the accounting report failed after the learnings fixture"
   assert_contains "$out" 'budget_status=over-budget' "report did not surface an over-budget total"
 
   outside="$TMP_ROOT/accounting-outside"
-  printf 'outside\n' > "$outside"
-  rm -f "$home/data/captain.md"
-  ln -s "$outside" "$home/data/captain.md"
-  set +e
+  printf 'outside\n' > "$outside" || fail "the external memory target could not be written"
+  rm -f "$home/data/captain.md" || fail "the captain memory fixture could not be removed"
+  ln -s "$outside" "$home/data/captain.md" \
+    || fail "the symlinked captain memory fixture could not be created"
   out=$(FM_HOME="$home" "$BUDGET" report 2>&1)
   rc=$?
-  set -e
   expect_code 2 "$rc" "unsafe memory input should fail the accounting command"
   assert_contains "$out" 'memory file is not an ordinary regular file' \
     "accounting failure did not identify the unsafe memory file"
@@ -206,25 +221,31 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
 
 new_propagation_world() {
   local world=$1 root="$1/root" home="$1/home" sm="$1/sm" head
-  mkdir -p "$home/config" "$home/data" "$home/state" "$root/bin"
-  touch "$home/state/.last-watcher-beat"
-  git init -q -b main "$root"
-  printf '%s\n' 'config/' > "$root/.gitignore"
-  printf '%s\n' '# Firstmate test root' > "$root/AGENTS.md"
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$root/bin/placeholder.sh"
-  chmod +x "$root/bin/placeholder.sh"
-  git -C "$root" add -A
-  git -C "$root" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -qm initial
-  head=$(git -C "$root" rev-parse HEAD)
-  git -C "$root" worktree add -q --detach "$sm" "$head"
-  printf '%s\n' sm > "$sm/.fm-secondmate-home"
-  mkdir -p "$sm/config" "$sm/data" "$sm/state" "$sm/projects"
+  mkdir -p "$home/config" "$home/data" "$home/state" "$root/bin" \
+    || fail "the propagation world could not be created"
+  touch "$home/state/.last-watcher-beat" || fail "the watcher beacon could not be created"
+  git init -q -b main "$root" || fail "the propagation root could not be initialized"
+  printf '%s\n' 'config/' > "$root/.gitignore" || fail "the root gitignore could not be written"
+  printf '%s\n' '# Firstmate test root' > "$root/AGENTS.md" \
+    || fail "the root AGENTS.md could not be written"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$root/bin/placeholder.sh" \
+    || fail "the placeholder script could not be written"
+  chmod +x "$root/bin/placeholder.sh" || fail "the placeholder script could not be made executable"
+  git -C "$root" add -A || fail "the propagation root could not be staged"
+  git -C "$root" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -qm initial \
+    || fail "the propagation root could not be committed"
+  head=$(git -C "$root" rev-parse HEAD) || fail "the propagation root has no resolvable head"
+  git -C "$root" worktree add -q --detach "$sm" "$head" \
+    || fail "the secondmate home could not be created"
+  printf '%s\n' sm > "$sm/.fm-secondmate-home" || fail "the secondmate marker could not be written"
+  mkdir -p "$sm/config" "$sm/data" "$sm/state" "$sm/projects" \
+    || fail "the secondmate home directories could not be created"
   {
     printf 'window=firstmate:fm-sm\n'
     printf 'kind=secondmate\n'
     printf 'harness=codex\n'
     printf 'home=%s\n' "$sm"
-  } > "$home/state/sm.meta"
+  } > "$home/state/sm.meta" || fail "the secondmate record could not be written"
   printf '%s|%s|%s\n' "$root" "$home" "$sm"
 }
 
@@ -252,17 +273,18 @@ run_config_push() {
 
 test_primary_budget_converges_with_exact_reread_and_safe_failures() {
   local world="$TMP_ROOT/propagation" rec root home sm fakebin log out rc instruction expected outside
-  mkdir -p "$world"
-  rec=$(new_propagation_world "$world")
+  mkdir -p "$world" || fail "the propagation world directory could not be created"
+  rec=$(new_propagation_world "$world") || fail "the propagation world could not be built"
   root=${rec%%|*}
   rec=${rec#*|}
   home=${rec%%|*}
   sm=${rec#*|}
-  fakebin=$(make_fake_toolchain "$world")
+  fakebin=$(make_fake_toolchain "$world") || fail "the propagation toolchain could not be built"
   log="$world/tmux.log"
 
-  printf '321\n' > "$home/config/startup-memory-budget"
-  out=$(run_config_push "$root" "$home" "$fakebin" "$log")
+  printf '321\n' > "$home/config/startup-memory-budget" \
+    || fail "the primary budget could not be written"
+  out=$(run_config_push "$root" "$home" "$fakebin" "$log") || fail "config push refused a safe budget"
   assert_contains "$out" 'startup-memory-budget: pushed' \
     "config push did not report the new budget as inherited"
   [ "$(<"$sm/config/startup-memory-budget")" = 321 ] \
@@ -283,24 +305,25 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
     "budget propagation doorbell did not identify the durable inbox"
 
   outside="$world/unsafe-budget"
-  printf '555\n' > "$outside"
-  rm -f "$sm/config/startup-memory-budget"
-  ln "$outside" "$sm/config/startup-memory-budget"
-  set +e
+  printf '555\n' > "$outside" || fail "the external propagation target could not be written"
+  rm -f "$sm/config/startup-memory-budget" || fail "the inherited budget could not be removed"
+  ln "$outside" "$sm/config/startup-memory-budget" \
+    || fail "the hardlinked inherited budget fixture could not be created"
   out=$(run_config_push "$root" "$home" "$fakebin" "$log" 2>&1)
   rc=$?
-  set -e
   expect_code 1 "$rc" "unsafe inherited destination should stop propagation"
   assert_contains "$out" 'startup-memory-budget: error - unsafe or invalid destination: file is hardlinked' \
     "unsafe inherited destination did not produce a concrete propagation error"
   [ "$(<"$outside")" = 555 ] || fail "unsafe destination handling changed its hardlinked source"
-  rm -f "$sm/config/startup-memory-budget"
-  run_config_push "$root" "$home" "$fakebin" "$log" >/dev/null
+  rm -f "$sm/config/startup-memory-budget" || fail "the hardlinked inherited budget could not be removed"
+  run_config_push "$root" "$home" "$fakebin" "$log" >/dev/null \
+    || fail "config push refused the safe retry"
   [ "$(<"$sm/config/startup-memory-budget")" = 321 ] \
     || fail "safe retry did not restore the converged primary budget"
 
-  rm -f "$home/config/startup-memory-budget"
-  out=$(run_config_push "$root" "$home" "$fakebin" "$log")
+  rm -f "$home/config/startup-memory-budget" || fail "the primary budget could not be removed"
+  out=$(run_config_push "$root" "$home" "$fakebin" "$log") \
+    || fail "config push refused to mirror primary absence"
   assert_contains "$out" 'startup-memory-budget: pushed - mirrored primary absence' \
     "primary absence was not reported as a converging removal"
   [ ! -e "$sm/config/startup-memory-budget" ] \
@@ -309,13 +332,12 @@ test_primary_budget_converges_with_exact_reread_and_safe_failures() {
   assert_contains "$(<"$instruction")" $'-----BEGIN config/startup-memory-budget-----\nABSENT\n-----END config/startup-memory-budget-----' \
     "budget absence reread did not use the explicit ABSENT payload"
 
-  rm -f "$sm/config/startup-memory-budget"
-  printf '555\n' > "$outside"
-  ln -s "$outside" "$home/config/startup-memory-budget"
-  set +e
+  rm -f "$sm/config/startup-memory-budget" || fail "the inherited budget could not be removed"
+  printf '555\n' > "$outside" || fail "the external propagation target could not be rewritten"
+  ln -s "$outside" "$home/config/startup-memory-budget" \
+    || fail "the symlinked primary budget fixture could not be created"
   out=$(run_config_push "$root" "$home" "$fakebin" "$log" 2>&1)
   rc=$?
-  set -e
   expect_code 1 "$rc" "unsafe primary budget should stop propagation"
   assert_contains "$out" 'startup-memory-budget: error - unsafe or invalid primary source: file is symlinked' \
     "unsafe primary budget did not produce a concrete propagation error"
