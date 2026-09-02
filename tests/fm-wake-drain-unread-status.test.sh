@@ -47,6 +47,54 @@ test_incident_note_answer_buried_under_routine_note_surfaces_both() {
   pass "a note: answer buried under a later routine note: is surfaced with both lines"
 }
 
+test_no_presentation_drain_neither_prints_nor_consumes() {
+  local dir state out status unread_after unread_before
+  dir=$(make_case no-presentation-flag)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-np.status"
+  prime_cursor "$state" "$status"
+
+  printf 'note: nobody has read this yet\n' >> "$status"
+  unread_before=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_new_lines_since_cursor "$2/task-np.status"
+  ' _ "$ROOT" "$state") || fail "could not read the unread span before the drain"
+  case "$unread_before" in *'nobody has read this yet'*) ;;
+    *) fail "fixture did not leave the note unread: $unread_before" ;;
+  esac
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --no-presentation > "$out" \
+    || fail "a --no-presentation drain failed"
+  if grep -F 'UNREAD STATUS' "$out" >/dev/null; then
+    fail "a --no-presentation drain printed a presentation section: $(cat "$out")"
+  fi
+
+  # The whole point: output nobody read must not be recorded as read.
+  unread_after=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_new_lines_since_cursor "$2/task-np.status"
+  ' _ "$ROOT" "$state") || fail "could not read the unread span after the drain"
+  case "$unread_after" in *'nobody has read this yet'*) ;;
+    *) fail "a --no-presentation drain consumed the presentation anyway: $unread_after" ;;
+  esac
+
+  # And an ordinary drain still presents and consumes it, so the flag is what
+  # changed the behaviour rather than the fixture being unreadable.
+  : > "$out"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "the ordinary drain failed"
+  grep -F 'task-np note: nobody has read this yet' "$out" >/dev/null \
+    || fail "the ordinary drain did not surface the note: $(cat "$out")"
+  unread_after=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_new_lines_since_cursor "$2/task-np.status"
+  ' _ "$ROOT" "$state") || fail "could not read the unread span after the ordinary drain"
+  case "$unread_after" in *'nobody has read this yet'*)
+      fail "the ordinary drain did not advance the cursor: $unread_after" ;;
+  esac
+  pass "a --no-presentation drain neither prints a presentation nor consumes one"
+}
+
 test_already_presented_notes_are_not_replayed() {
   local dir state out status
   dir=$(make_case no-replay)
@@ -535,6 +583,7 @@ test_routine_working_lines_stay_silent_on_the_empty_queue() {
 }
 
 test_incident_note_answer_buried_under_routine_note_surfaces_both
+test_no_presentation_drain_neither_prints_nor_consumes
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
 test_signal_annotation_surfaces_every_unread_note_not_only_the_newest

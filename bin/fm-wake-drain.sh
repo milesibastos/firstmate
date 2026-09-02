@@ -29,6 +29,11 @@ RECOVERY_MARKER_TOKEN=
 RECOVERY_ACK_REQUIRED=false
 RECOVERY_ACK_MOVED=false
 ACK_THROUGH=
+# A drain whose caller discards this script's prose output presents to nobody, so
+# it must not consume presentations. Only the caller knows that, so it is passed
+# in rather than inferred from a mode flag: away mode is not the property that
+# matters, "was this output actually read" is.
+NO_PRESENTATION=false
 ACK_GENERATION=
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
@@ -141,6 +146,10 @@ require_branch_eligible_rows() {
 
 case "${1:-}" in
   '') ;;
+  --no-presentation)
+    [ "$#" -eq 1 ] || { echo "wake drain: --no-presentation takes no other arguments" >&2; exit 2; }
+    NO_PRESENTATION=true
+    ;;
   --ack-through)
     ACK_THROUGH=${2:-}
     case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
@@ -150,7 +159,7 @@ case "${1:-}" in
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) echo "usage: fm-wake-drain.sh [--no-presentation | --ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
@@ -362,6 +371,10 @@ print_status_sections() {
 
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
+  # Nothing is shown, so nothing may be recorded as shown. Committing here would
+  # publish a cursor claiming a presentation that never reached a reader, which
+  # is exactly what the cursor is supposed to prove.
+  [ "$NO_PRESENTATION" = false ] || return 0
   fm_lock_acquire_wait "$lock" || return 1
   snapshot=$(status_presentation_snapshot "$STATE") || {
     printf 'STATUS PRESENTATION INCOMPLETE: status snapshot could not be read.\n'

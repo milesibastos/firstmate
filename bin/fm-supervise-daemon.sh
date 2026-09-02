@@ -1437,7 +1437,11 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   local handled=0 failed=0 ack_through ack_generation
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
-  if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
+  # This drain is read for its queue rows only; every prose section it would
+  # print is discarded below. Ask it not to consume presentations, or its own
+  # commit would record those status lines as shown to the captain when this
+  # daemon is the only thing that ever saw them.
+  if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" --no-presentation > "$out" 2> "$err"; then
     cat "$err" >&2
     rm -f "$out" "$err"
     return 1
