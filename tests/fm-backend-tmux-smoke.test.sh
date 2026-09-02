@@ -188,6 +188,23 @@ wait_agent_state_is() {  # <target> <wanted> [samples]
   return 1
 }
 
+# wait_server_gone: block until the tmux server process named by <pid> has
+# actually exited. `kill-server` (and a last-session `kill-session`) just
+# self-signal the server and return - the requesting client's command
+# completes before the server's event loop has processed that signal. A
+# connection landing in that window is accepted then dropped mid-protocol,
+# which is neither the ENOENT/ECONNREFUSED absence this suite checks for nor
+# a live, readable server: settle past it instead of racing it.
+wait_server_gone() {  # <pid> [samples]
+  local pid=$1 samples=${2:-100} i=0
+  while [ "$i" -lt "$samples" ]; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.05
+    i=$((i + 1))
+  done
+  return 1
+}
+
 [ -z "$(fm_backend_tmux_label_sightings "$WINDOW")" ] \
   || fail "a killed window must leave no sighting of its label"
 pass "real tmux: label sightings report nothing for a window that is gone"
@@ -243,7 +260,11 @@ pass "real tmux: a stable window id removes exactly the window it names"
 
 # The observed incident: the whole session went with the terminal that hosted
 # it. The rebuild has to restore the recorded SESSION too, not just the window.
+server_pid=$(tmux display-message -p -t "=$SESSION:" '#{pid}') \
+  || fail "real tmux: could not read the server pid before killing the recorded session"
 tmux kill-session -t "=$SESSION" || fail "real tmux: could not remove the recorded session"
+wait_server_gone "$server_pid" \
+  || fail "real tmux: the server did not exit after its last session was killed"
 tmux has-session -t "=$SESSION" 2>/dev/null \
   && fail "the recorded session should be gone before the whole-host rebuild"
 wid=$(fm_backend_tmux_endpoint_rebuild "$TARGET" "$REBUILD_DIR") \
@@ -256,7 +277,11 @@ pass "real tmux: endpoint rebuild recreates the recorded session when the whole 
 
 # An absent server is an authoritative zero, not an unreadable inventory: there
 # is nothing a task could still be running on.
+server_pid=$(tmux display-message -p -t "=$SESSION:" '#{pid}') \
+  || fail "real tmux: could not read the server pid before the final kill-server"
 "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+wait_server_gone "$server_pid" \
+  || fail "real tmux: the server did not exit after kill-server"
 sightings=$(fm_backend_tmux_label_sightings "$WINDOW") \
   || fail "label sightings should succeed against a definitively absent server"
 [ -z "$sightings" ] || fail "an absent server should report no sightings, got '$sightings'"
