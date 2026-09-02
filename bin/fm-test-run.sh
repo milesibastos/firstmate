@@ -153,7 +153,12 @@ CHANGED_DEFAULT_TIMEOUT_SECS=900
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
-PORTABLE_SERIAL_SHARDS=4
+# Sized so the slowest shard stays at or under half its 20-minute job cap, which
+# is what makes that cap a hang tripwire rather than the expected end of the
+# lane. Against the measured 64.9-minute lane below, 7 is the smallest count
+# that holds: 6 shards project 10.8 minutes and miss it.
+# docs/fm-test-portable-shards.md owns the measurement and the re-shard trigger.
+PORTABLE_SERIAL_SHARDS=7
 
 # Balance hint for a portable-serial script with no measured duration, close to
 # the measured per-script mean so a newly added test neither starves nor

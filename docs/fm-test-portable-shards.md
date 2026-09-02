@@ -75,15 +75,50 @@ Hinted scripts also drifted, `tests/fm-public-followup.test.sh` from 36 s to 204
 Together that let shard 3 reach 19m19s of a 20-minute cap on a green run while shard 2 finished in 12m09s, and shard 4 cross the cap outright on two branches the same night.
 Refresh the hints whenever the serial lane gains scripts, rather than waiting for a shard to time out.
 
-| Lane | Script count | Estimated duration |
+### Choosing the shard count
+
+The 20-minute job cap is a hang tripwire at roughly 2x the healthy wall, not the expected end of the lane.
+That is the sizing rule: pick the smallest shard count whose slowest projected shard stays at or under 10 minutes, measuring each script at its slowest observed run.
+
+| Shards | Projected slowest shard |
+|---:|---:|
+| 4 | 16.2 min |
+| 5 | 13.0 min |
+| 6 | 10.8 min |
+| **7** | **9.3 min** |
+| 8 | 8.1 min |
+
+Seven is the smallest count that holds; six misses by 0.8 minutes.
+Raising the timeout instead was the wrong lever, because the lane's work grew 53% between 2026-08-21 and 2026-09-01: any budget sized to today's 16-minute shards is crossed again by the next comparable growth, while the shard count absorbs it.
+The extra runners are close to free, since a shard's job setup costs about 15 seconds against 9.3 minutes of tests.
+
+These are projections from the hints above, not observed walls: the seven-shard layout has not run yet.
+Confirm them against the first green run's own timing artifacts, since the projection assumes the packing holds on real runners.
+
+| Lane | Script count | Projected duration |
 |---|---:|---:|
-| `portable-serial-1of4` | 35 | 973 s (~16.2 min) |
-| `portable-serial-2of4` | 36 | 973 s (~16.2 min) |
-| `portable-serial-3of4` | 35 | 973 s (~16.2 min) |
-| `portable-serial-4of4` | 35 | 973 s (~16.2 min) |
+| `portable-serial-1of7` | 19 | 556 s (~9.3 min) |
+| `portable-serial-2of7` | 18 | 556 s (~9.3 min) |
+| `portable-serial-3of7` | 19 | 556 s (~9.3 min) |
+| `portable-serial-4of7` | 22 | 556 s (~9.3 min) |
+| `portable-serial-5of7` | 21 | 556 s (~9.3 min) |
+| `portable-serial-6of7` | 20 | 556 s (~9.3 min) |
+| `portable-serial-7of7` | 22 | 556 s (~9.3 min) |
 | imbalance | | under 1 s |
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 258 s, is the floor for any shard count.
+
+### Re-shard trigger
+
+Re-shard when any shard's measured script time passes 10 minutes, rather than when a shard times out.
+Check it against any green run's own artifacts:
+
+```sh
+gh run download <run-id> -R milesibastos/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
+jq -r '[.scripts[].duration_ms]|add/60000' /tmp/fm-serial/*.json
+```
+
+Refresh the hints first, since a shard is only over the threshold once its packing is honest; raise `PORTABLE_SERIAL_SHARDS` if the slowest shard is still over 10 minutes afterwards.
 
 Refresh the hints by downloading the per-shard timing artifacts from a green CI run, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs, and updating the table above:
 
@@ -115,7 +150,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound | Rationale |
 |---|---|---|
 | portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-4 | job `timeout-minutes: 20` | Each balanced shard is about eleven minutes of measured script time, leaving roughly 2x hang-tripwire margin for job setup and runner-speed spread. |
+| portable serial 1-7 | job `timeout-minutes: 20` | Each balanced shard projects to about 9.3 minutes of script time plus about 15 s of job setup, holding the roughly 2x hang-tripwire margin. The shard count, not this number, is what keeps that margin as the lane grows. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finish around 7 minutes, so the step bound is the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. |
 
 Timeouts are hang tripwires rather than expected healthy durations.
