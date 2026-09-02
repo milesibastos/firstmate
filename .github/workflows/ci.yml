@@ -129,15 +129,22 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Measured whole remainder is ~42 min of serial work; the balanced shards
-    # are ~10.6 min each. Cap is a hang tripwire with roughly 2x margin, not the
-    # expected healthy end of the lane.
+    # Cap is a hang tripwire at roughly 2x the healthy wall, not the expected end
+    # of the lane. Measured whole remainder is ~64.9 min of serial work (slowest
+    # run of each script across four green main runs, 2026-09-01); balanced
+    # across this matrix that projects to ~9.3 min per shard, plus ~15 s setup.
+    # The shard COUNT, not this number, is the lever that holds that margin as
+    # the lane grows: raise the count when a shard's measured script time passes
+    # 12 min. That trigger is sized above observed runner-speed variance, not
+    # at the projection, so it reports growth rather than a slow runner.
+    # bin/fm-test-run.sh owns the count and refuses a matrix that disagrees;
+    # docs/fm-test-portable-shards.md owns the measured spread and margin.
     timeout-minutes: 20
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@v6
         with:
