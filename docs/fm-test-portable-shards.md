@@ -92,19 +92,22 @@ Seven is the smallest count that holds; six misses by 0.8 minutes.
 Raising the timeout instead was the wrong lever, because the lane's work grew 53% between 2026-08-21 and 2026-09-01: any budget sized to today's 16-minute shards is crossed again by the next comparable growth, while the shard count absorbs it.
 The extra runners are close to free, since a shard's job setup costs about 15 seconds against 9.3 minutes of tests.
 
-These are projections from the hints above, not observed walls: the seven-shard layout has not run yet.
-Confirm them against the first green run's own timing artifacts, since the projection assumes the packing holds on real runners.
+The projection is 556 s (~9.3 min) for every shard, since the packing balances hint sums to within a second.
+The measured column is the first green seven-shard run, [33585388230](https://github.com/milesibastos/firstmate/actions/runs/33585388230), which is the run that introduced this layout.
 
-| Lane | Script count | Projected duration |
-|---|---:|---:|
-| `portable-serial-1of7` | 19 | 556 s (~9.3 min) |
-| `portable-serial-2of7` | 18 | 556 s (~9.3 min) |
-| `portable-serial-3of7` | 19 | 556 s (~9.3 min) |
-| `portable-serial-4of7` | 22 | 556 s (~9.3 min) |
-| `portable-serial-5of7` | 21 | 556 s (~9.3 min) |
-| `portable-serial-6of7` | 20 | 556 s (~9.3 min) |
-| `portable-serial-7of7` | 22 | 556 s (~9.3 min) |
-| imbalance | | under 1 s |
+| Lane | Script count | Projected | First measured |
+|---|---:|---:|---:|
+| `portable-serial-1of7` | 19 | ~9.3 min | 8.9 min |
+| `portable-serial-2of7` | 18 | ~9.3 min | 10.3 min |
+| `portable-serial-3of7` | 19 | ~9.3 min | 6.0 min |
+| `portable-serial-4of7` | 22 | ~9.3 min | 7.6 min |
+| `portable-serial-5of7` | 21 | ~9.3 min | 7.5 min |
+| `portable-serial-6of7` | 22 | ~9.3 min | 7.9 min |
+| `portable-serial-7of7` | 20 | ~9.3 min | 8.4 min |
+
+Balancing hint sums does not make observed walls equal: that run spread 6.0 to 10.3 minutes against a flat 9.3-minute projection.
+The gap is runner speed, not packing error, and it is why the sizing rule leaves half the cap free rather than trimming to the projection.
+It also means a single shard drifts past the 10-minute trigger below on ordinary variance; the refresh step there is what tells that apart from real growth.
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 258 s, is the floor for any shard count.
 
