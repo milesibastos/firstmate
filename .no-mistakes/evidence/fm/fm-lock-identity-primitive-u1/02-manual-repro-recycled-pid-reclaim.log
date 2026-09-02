@@ -1,0 +1,45 @@
+Manual, end-to-end CLI reproduction of the defect this change fixes: a lock
+holder that dies (kernel could recycle its pid to an unrelated process) is
+correctly identified as dead and its lock is reclaimed - proven by directly
+driving the shipped fm_lock_try_acquire / fm_lock_holder_is_current functions
+against a real background holder process, not by reading source.
+
+$ cd <worktree>
+$ rm -rf /tmp/repro-home && mkdir -p /tmp/repro-home/state
+$ LOCKDIR=/tmp/repro-home/state/.home-summary-refresh.lock
+$ FM_ROOT_OVERRIDE="$PWD" FM_HOME=/tmp/repro-home bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$2"
+    : > "$3"
+    sleep 30
+  ' _ "$PWD" "$LOCKDIR" /tmp/repro-marker &
+HOLDER_PID=$!
+# ... wait for /tmp/repro-marker to appear ...
+
+$ ps -p "$HOLDER_PID" -o pid,ppid,command
+  PID  PPID COMMAND
+77554 77456 sleep 30
+
+$ cat $LOCKDIR/pid
+77554
+
+$ cat $LOCKDIR/pid-identity
+Tue Sep  1 23:53:30 2026     bash -c ...
+
+# Confirms identity IS recorded at acquisition (point 1 of the intent).
+
+$ kill -KILL 77554 ; wait 77554
+$ kill -0 77554 2>/dev/null && echo alive || echo dead
+dead
+
+$ FM_ROOT_OVERRIDE="$PWD" FM_HOME=/tmp/repro-home FM_LOCK_STALE_AFTER=0 bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s proof=%s recovered=%s\n" \
+      "$rc" "${FM_LOCK_HELD_PID:-}" "${FM_LOCK_HOLDER_PROOF:-}" "${FM_LOCK_RECOVERED_PID:-}"
+  ' _ "$PWD" "$LOCKDIR"
+rc=0 held= proof=dead recovered=77554
+
+# The dead holder's lock was correctly reclaimed (rc=0), with FM_LOCK_HOLDER_PROOF
+# naming the evidence (dead) and FM_LOCK_RECOVERED_PID naming the abandoned pid,
+# exactly matching the contract documented in fm_lock_holder_is_current.

@@ -1,0 +1,33 @@
+End-to-end evidence for the cross-language consumer fix in bin/fm-extension.mjs
+(releaseLifecycleLock), isolated by running just the affected conformance
+section (FM_EXTENSION_BINDING_SEGMENT=lifecycle-flow) of the real
+tests/fm-extension-binding.test.sh suite against three points in this branch's
+history.
+
+1) Intermediate commit 31e46e70948355ff8a830446522d5b637b8a5ec0 (has the
+   shell-side pid-identity recording, does NOT yet have the fm-extension.mjs
+   release fix) - reproduces the exact bug the intent describes:
+
+   $ FM_EXTENSION_BINDING_SEGMENT=lifecycle-flow bash tests/fm-extension-binding.test.sh
+   error[binding-failed]: error[internal]: ENOTEMPTY: directory not empty, rmdir
+     '.../.extension-binding-lifecycle.lock.owner.50qsdl'
+   not ok - local bind returned no binding retirement identity
+   EXIT:1
+
+2) Target commit 68238561bc13fb4fa2fd1d98deeb3b31947717bc (this change, with the
+   fm-extension.mjs fix that clears every file the owner directory actually
+   holds instead of a hardcoded "pid" unlink) - the same section passes cleanly:
+
+   $ FM_EXTENSION_BINDING_SEGMENT=lifecycle-flow bash tests/fm-extension-binding.test.sh
+   ok - one external adapter registers, invokes, captures unhandled evidence, classifies, and terminally retires end to end
+   ok - inner result.silent host crash releases the parent lifecycle lock before terminal retry
+   ok - local binding retirement requires its exact identity and disables invocation
+
+   all extension-binding tests passed
+   EXIT:0
+
+This directly demonstrates: the pid-identity recording introduced a second file
+into a lock's owner directory; the pre-fix JS release logic (unlink "pid" only)
+left that file behind and the rmdir failed ENOTEMPTY; the shipped fix (read the
+owner directory and clear whatever is actually there) resolves it end-to-end
+through the real bash-acquires/JS-releases lifecycle path.

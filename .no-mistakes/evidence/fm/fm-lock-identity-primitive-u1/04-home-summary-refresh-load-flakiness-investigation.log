@@ -1,0 +1,26 @@
+Investigation of an intermittent failure in tests/fm-home-summary-refresh.test.sh
+("a dead publication lock wedged publication", the "publication remains
+single-flight across watcher restart" case) observed while running this suite
+concurrently with 7 other heavy test suites.
+
+Timeline:
+- Target commit, run concurrently with 7 other suites: FAILED twice
+  ("not ok - a dead publication lock wedged publication").
+- Base commit (252cad7...), run alone: PASSED.
+- Target commit, re-run alone (no concurrent load): PASSED twice (once via
+  `bash -x` trace, once via bin/fm-test-run.sh).
+- Base and target, re-run SIMULTANEOUSLY under matched synthetic CPU load
+  (6 busy-loop processes pinned at ~72% CPU each, to reproduce the same
+  contention as the original 8-suite concurrent run): BOTH FAILED identically
+  with the same "not ok - a dead publication lock wedged publication" message.
+  Debug output showed the underlying lock directory left in an inconsistent/
+  orphaned state (an owner directory present, primary lock symlink missing or
+  a stray owner directory) on BOTH commits - i.e. a pre-existing race in the
+  lock acquire/reclaim directory dance under heavy CPU starvation, present
+  before this change and not introduced by it.
+
+Conclusion: this is flaky, load-sensitive test/infrastructure behavior that
+predates this branch, not a regression introduced by the lock-identity change.
+It reproduces identically on the base commit under matched load and passes
+reliably on both commits when the machine is not under heavy contention.
+Reported as an informational (no-op) finding, not a blocker for this change.
