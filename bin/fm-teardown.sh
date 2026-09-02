@@ -1598,30 +1598,27 @@ $out
 EOF
 }
 
-task_process_identity() {  # <pid>
-  local pid=$1 proc_root stat_line starttime value
-  local -a stat_fields
-  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
-  if [ -r "$proc_root/$pid/stat" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
-    printf 'starttime=%s\n' "$starttime"
-    return 0
-  fi
-  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
-  value=$(fm_nm_trim "$value")
-  [ -n "$value" ] || return 1
-  case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  printf 'lstart=%s\n' "$value"
-}
-
+# Whether <pid> is still, provably, the process this teardown scanned - the
+# precondition for signalling it. fm_pid_identity and fm_identity_holder_is_current
+# (bin/fm-wake-lib.sh) own what an identity is and what comparing two of them
+# proves; this asks only for their verdict.
+#
+# PROOF IS REQUIRED because the next step is a kill. The shared predicate's
+# return code is permissive - it answers "not disproved", which is the safe
+# direction for a lock that must not be stolen and the wrong one for a pid that
+# is about to be signalled - so the verdict itself is what decides here. An
+# identity that cannot be recomputed or compared leaves its process alone;
+# teardown then refuses on a later pass rather than signalling something it
+# could not identify.
+#
+# Start time is what carries this, not the command: a process that execs while
+# rooted under the worktree is still the same process and must still be reaped
+# (tests/fm-teardown.test.sh's exec-changed case). The shared predicate accepts
+# that as identity-start-only, which is exactly the proof this had before it
+# stopped recording the command at all.
 task_process_identity_matches() {  # <pid> <identity>
-  local current
-  current=$(task_process_identity "$1") || return 1
-  [ "$current" = "$2" ]
+  fm_identity_holder_is_current "$2" "$1" || return 1
+  fm_identity_proves_same_process "$FM_IDENTITY_PROOF"
 }
 
 task_pid_list_contains() {  # <pid-list> <pid>
@@ -1656,7 +1653,7 @@ reap_task_backend_process_group() {  # <label>
     return 0
     ;;
   esac
-  leader_start=$(task_process_identity "$leader") || {
+  leader_start=$(fm_pid_identity "$leader") || {
     echo "warning: lsof is unavailable; cannot identify the tmux pane process group for $ID" >&2
     return 0
   }
@@ -1713,7 +1710,7 @@ reap_task_worktree_processes() {  # <label> <dir>...
     tracked_identities=()
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
-      if ! identity=$(task_process_identity "$pid"); then
+      if ! identity=$(fm_pid_identity "$pid"); then
         if ! task_pids_under_roots "$@"; then
           echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
           return 1
