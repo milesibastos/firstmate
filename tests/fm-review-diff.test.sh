@@ -157,10 +157,8 @@ test_unreachable_pr_head_falls_back_with_warning() {
     "pr=https://github.com/example/repo/pull/9" \
     "pr_head=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
-  set +e
   out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
-  set -e
-  err=$(cat "$case_dir/stderr")
+  err=$(cat "$case_dir/stderr") || fail "fetch-fallback: the captured stderr could not be read"
 
   assert_contains "$err" 'warning: PR head unavailable; diff may lag the open PR' \
     "fetch-fallback: must warn when PR head cannot be resolved"

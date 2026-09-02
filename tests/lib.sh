@@ -92,7 +92,6 @@ fm-afk-return.test.sh:6
 fm-backend-orca.test.sh:15
 fm-backlog-handoff.test.sh:15
 fm-bearings-board.test.sh:8
-fm-documentation-audiences.test.sh:3
 fm-fleet-sync.test.sh:8
 fm-on.test.sh:unmeasured
 fm-pr-check-security.test.sh:26
@@ -102,7 +101,6 @@ fm-remote-backlog-handoff.test.sh:unmeasured
 fm-remote-doctor.test.sh:13
 fm-remote-reply.test.sh:unmeasured
 fm-remote-secondmate-lifecycle-e2e.test.sh:unmeasured
-fm-review-diff.test.sh:1
 fm-secondmate-reconcile.test.sh:10
 fm-secondmate-safety.test.sh:24
 fm-startup-memory-budget.test.sh:3
