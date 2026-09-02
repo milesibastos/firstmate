@@ -254,7 +254,7 @@ fi
 
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
-  mkdir -p "$fakebin"
+  mkdir -p "$fakebin" || fail "the fake tool directory could not be created"
   printf '%s\n' "$fakebin"
 }
 
