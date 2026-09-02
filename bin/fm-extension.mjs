@@ -2058,7 +2058,20 @@ async function releaseLifecycleLock() {
   await assertLifecycleLockOwned();
   const { lockPath, ownerPath } = activeLifecycleLock;
   await unlink(lockPath);
-  await unlink(path.join(ownerPath, "pid"));
+  // This lock is taken in bash and released here, and fm_lock_clean_known_files
+  // in bin/fm-wake-lib.sh is the one owner of which files a lock record holds.
+  // That set grows: when acquisition began recording a pid-identity file for
+  // recycled-pid detection, a release that unlinked only "pid" started failing
+  // ENOTEMPTY on the rmdir below and took every bind down with it. Clear what
+  // the owner directory actually holds instead of keeping a second copy of that
+  // list in this language, so the two implementations cannot drift again.
+  // assertLifecycleLockOwned has already proven ownerPath is a real directory,
+  // not a symlink, owned by this user.
+  for (const entry of await readdir(ownerPath)) {
+    await unlink(path.join(ownerPath, entry)).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+  }
   await rmdir(ownerPath);
   activeLifecycleLock = null;
 }

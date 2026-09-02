@@ -338,11 +338,42 @@ fm_lock_owner_dir() {
 }
 
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back
+  local ownerdir=$1 mypid back identity
   mypid=${BASHPID:-$$}
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
-  [ "$back" = "$mypid" ]
+  [ "$back" = "$mypid" ] || return 1
+  # Record WHO took the lock, in the pid-identity file every other supervision
+  # lock in this repo already uses, so a later reader can tell this holder from
+  # an unrelated process that inherited its recycled pid. Resolve the pid into a
+  # variable FIRST: expanding ${BASHPID:-$$} inside the command substitution
+  # would record the identity of that subshell instead of this frame.
+  #
+  # The write is verified by readback and is BEST EFFORT: a half-written
+  # identity file would make this very holder unrecognisable to itself and get
+  # its live lock stolen, so a failed or unverified write removes the file and
+  # leaves the lock identityless rather than refusing the acquisition. An
+  # identityless lock is exactly what fm_lock_holder_is_current reports as
+  # liveness-only, and acquisition must keep working on any platform where no
+  # identity fact is available at all.
+  #
+  # Cost, measured on this fleet's macOS host (no /proc, so fm_pid_identity
+  # forks ps) rather than assumed, 2026-09-01: 5.35 ms per acquire, against
+  # 9.17 ms for the mktemp -d this same acquire path already pays
+  # unconditionally, on a path that already spawns about ten subprocesses.
+  # Interleaved A/B over 240 acquire+release cycles put the end-to-end
+  # difference at a +10.8 ms median on a loaded box. So this records for EVERY
+  # lock: the fork is noise inside an existing cost class, while restricting it
+  # to a few long-lived locks would need a lock-name policy list inside this
+  # generic primitive and would leave the recycled-pid defect in about 127 of
+  # the roughly 130 acquire call sites.
+  if identity=$(fm_pid_identity "$mypid" 2>/dev/null) && [ -n "$identity" ] \
+    && printf '%s\n' "$identity" > "$ownerdir/pid-identity" 2>/dev/null \
+    && [ "$(cat "$ownerdir/pid-identity" 2>/dev/null || true)" = "$identity" ]; then
+    return 0
+  fi
+  rm -f "$ownerdir/pid-identity" 2>/dev/null || true
+  return 0
 }
 
 fm_lock_link_owner() {
@@ -374,6 +405,139 @@ fm_lock_remove_stray_owner_link() {
   if [ -L "$stray" ] && [ "$(readlink "$stray" 2>/dev/null || true)" = "$ownerdir" ]; then
     rm -f "$stray" 2>/dev/null || true
   fi
+}
+
+# fm_identity_start_component <identity>
+# Print the START-TIME half of an identity string produced by fm_pid_identity,
+# tagged with the form it came from, or fail when the string carries no usable
+# start time. Both forms fm_pid_identity emits are handled:
+#   "<key>=<ticks> cmdline-hex=<hex>"  -> "proc <ticks>"
+#   "<lstart> <command>"               -> "ps <five lstart fields>"
+# This reads fm_pid_identity's existing output; it never changes what that
+# function emits, because identities recorded by already-running processes and
+# by locks already held in live homes must keep matching what new code computes.
+# <key> itself (linux-starttime vs proc-starttime) is dropped rather than
+# compared: it names which uname string produced the identity, not a fact
+# about the process, and two processes on the same host can disagree on it.
+fm_identity_start_component() {
+  local identity=$1
+  local -a fields
+  local token
+  case "$identity" in
+    proc-starttime=*|linux-starttime=*)
+      token=${identity%% *}
+      printf 'proc %s\n' "${token#*=}"
+      return 0
+      ;;
+  esac
+  # ps lstart is five whitespace-separated fields: DoW Mon DD HH:MM:SS YYYY.
+  read -r -a fields <<< "$identity"
+  [ "${#fields[@]}" -ge 5 ] || return 1
+  printf 'ps %s %s %s %s %s\n' \
+    "${fields[0]}" "${fields[1]}" "${fields[2]}" "${fields[3]}" "${fields[4]}"
+}
+
+# fm_lock_holder_is_current <lockdir> <pid>
+# True while <pid> is still the process that took <lockdir>.
+#
+# IDENTITY ONLY. This answers "is this the same process", never "has it made
+# progress recently": it reads no mtime, no heartbeat, and no age. A correct
+# holder that has been idle for hours is still the holder, and conflating the
+# two questions here would evict live owners (the failure fm-snapshot-cadence-e2
+# shipped one layer up). Freshness stays where it belongs, in the separately
+# named fm_lock_mid_acquire_is_fresh and in each caller's own staleness proof.
+#
+# Sets FM_LOCK_HOLDER_PROOF to the evidence behind the verdict:
+#   identity      held, and the whole recorded identity recomputed and matched
+#   identity-start-only
+#                 held on start time alone: same process, different command (see
+#                 the bash note below)
+#   liveness-only held, but the lock records no identity to check (a lock taken
+#                 by an older build, or on a host where no identity fact could
+#                 be computed at acquisition)
+#   unprovable    held, an identity IS recorded, but it cannot be recomputed now
+#                 or cannot be compared with what is recorded
+#   mismatch      NOT held: the pid started at a different time, so the recorded
+#                 holder is gone and this pid was reused
+#   dead          NOT held: no such process
+#
+# START TIME DECIDES; THE COMMAND ONLY CORROBORATES. A shell replaces itself
+# with the last simple command of its script, so the ordinary holder idiom
+# `( acquire_lock; some_command ) &` execs into some_command: same pid, same
+# start time, NEW command, still alive and still holding the lock. Treating that
+# command change as proof of a recycled pid evicts a live, correct holder, which
+# is worse than the recovery-suppression bug this check exists to fix - it
+# produces two owners of something that exists to have one. The command is still
+# recorded and still compared, because a divergence is worth reporting, but it
+# never vetoes. Do not reinstate it as a veto: its absence here is deliberate.
+#
+# What defeats pid recycling was never the command. It is the start time, and a
+# recycled pid can only pass that by having its new occupant start inside the
+# same clock tick (/proc) or the same second (ps) as the old one, against a
+# measured full pid-space wrap of 65 to 90 seconds - about a 75x margin on the
+# weaker of the two platforms.
+#
+# TZ CAVEAT, pre-existing and NOT fixed here. The portable ps fallback's lstart
+# (fm_pid_identity above) renders under the checker's inherited TZ, which is
+# not pinned the way LC_ALL is, so two processes reading the same live holder
+# under different TZ settings compute different start-time components. That
+# matters more after this change than before: start time now DECIDES this
+# verdict, and the comparison runs at every lock acquire rather than the four
+# identity call sites it used to, so a TZ mismatch would evict a live holder -
+# the too-strict direction this whole change exists to avoid. Not fixed here
+# because pinning TZ would change what fm_pid_identity emits, and identities
+# already recorded by running processes and by locks already held in live
+# homes must keep matching what new code computes; that needs its own
+# migration, not a quiet edit.
+#
+# The two unproven-but-held verdicts fail SAFE toward the current holder.
+# Refusing to steal a lock whose ownership cannot be disproved leaves recovery
+# waiting; claiming an identity that was never established produces two owners
+# of something that exists to have one, which is strictly worse. Both are named
+# rather than silently folded into the liveness answer, so a caller or test can
+# see when identity was not actually proved.
+#
+# That permissive direction is the precedent fm_autoarm_release_abandoned below
+# already sets, not a new rule: there too, missing identity evidence disables
+# the dangerous action rather than authorizing it. It also carries the fleet
+# through the upgrade window, where every lock already held in a live home has
+# no recorded identity and must keep reading as held.
+FM_LOCK_HOLDER_PROOF=
+fm_lock_holder_is_current() {
+  local lockdir=$1 pid=$2 recorded current recorded_start current_start
+  FM_LOCK_HOLDER_PROOF=dead
+  fm_pid_alive "$pid" || return 1
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  if [ -z "$recorded" ]; then
+    FM_LOCK_HOLDER_PROOF=liveness-only
+    return 0
+  fi
+  if ! current=$(fm_pid_identity "$pid" 2>/dev/null) || [ -z "$current" ]; then
+    FM_LOCK_HOLDER_PROOF=unprovable
+    return 0
+  fi
+  if [ "$current" = "$recorded" ]; then
+    FM_LOCK_HOLDER_PROOF=identity
+    return 0
+  fi
+  # The strings differ. Only the start-time half decides.
+  if ! recorded_start=$(fm_identity_start_component "$recorded") \
+    || ! current_start=$(fm_identity_start_component "$current"); then
+    FM_LOCK_HOLDER_PROOF=unprovable
+    return 0
+  fi
+  # Identities recorded in one form and re-read in the other carry no comparable
+  # fact, so they are unprovable rather than proof of a reused pid.
+  if [ "${recorded_start%% *}" != "${current_start%% *}" ]; then
+    FM_LOCK_HOLDER_PROOF=unprovable
+    return 0
+  fi
+  if [ "$recorded_start" != "$current_start" ]; then
+    FM_LOCK_HOLDER_PROOF=mismatch
+    return 1
+  fi
+  FM_LOCK_HOLDER_PROOF='identity-start-only'
+  return 0
 }
 
 fm_lock_claim_blocked_by_steal() {
@@ -473,7 +637,7 @@ fm_lock_recheck_stale_owner() {
   fi
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
-  if fm_pid_alive "$actual_pid"; then
+  if fm_lock_holder_is_current "$lockdir" "$actual_pid"; then
     return 1
   fi
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
@@ -791,11 +955,32 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+# The reclaim escalation is bounded. fm_lock_try_acquire below recurses into
+# "<lock>.steal" to serialize a stale-owner reclaim, and that steal mutex can
+# itself go stale, so the escalation is genuinely recursive rather than one
+# level deep. Unbounded, it is a crash: when the lock directory cannot be
+# written, every level fails to create its lock and escalates again, appending
+# another ".steal" forever until bash dies on its own stack (reproduced with
+# FUNCNEST, and observed in the wild as "Segmentation fault (core dumped)" plus
+# a multi-minute stall). A bash that dies mid-critical-section runs no cleanup,
+# so callers leak whatever they were holding.
+#
+# A real reclaim needs one or two levels; this ceiling is far above that and far
+# below any stack limit. Reaching it means the escalation is not converging, and
+# refusing there returns an ordinary "cannot acquire" that every caller already
+# handles, instead of taking the process down.
+FM_LOCK_MAX_STEAL_DEPTH=${FM_LOCK_MAX_STEAL_DEPTH:-8}
+
+# fm_lock_try_acquire <lockdir> [steal-depth]
+# The second argument is internal: it counts how many ".steal" escalations deep
+# this attempt already is. Callers pass one argument.
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 depth=${2:-0} pid steal cur rc steal_owner primary_owner
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+  # shellcheck disable=SC2034 # Read by callers and tests after this returns.
+  FM_LOCK_HOLDER_PROOF=
 
   if fm_lock_try_create "$lockdir"; then
     return 0
@@ -820,7 +1005,7 @@ fm_lock_try_acquire() {
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     return 1
   fi
-  if fm_pid_alive "$pid"; then
+  if fm_lock_holder_is_current "$lockdir" "$pid"; then
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
@@ -829,16 +1014,28 @@ fm_lock_try_acquire() {
     return 1
   fi
 
-  steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  case "$depth" in
+    ''|*[!0-9]*) depth=0 ;;
+  esac
+  if [ "$depth" -ge "$FM_LOCK_MAX_STEAL_DEPTH" ]; then
+    # Not converging. Report the holder we saw and let the caller retry rather
+    # than escalating into another level of recursion.
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+
+  steal="$lockdir.steal"
+  if ! fm_lock_try_acquire "$steal" "$((depth + 1))"; then
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+    fm_lock_holder_is_current "$lockdir" "$FM_LOCK_HELD_PID" || true
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if fm_pid_alive "$cur"; then
+  if fm_lock_holder_is_current "$lockdir" "$cur"; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
     FM_LOCK_OWNER_DIR=
@@ -854,6 +1051,7 @@ fm_lock_try_acquire() {
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    fm_lock_holder_is_current "$lockdir" "$FM_LOCK_HELD_PID" || true
     return 1
   fi
 
@@ -887,6 +1085,7 @@ fm_lock_try_acquire() {
     # shellcheck disable=SC2034 # Read by callers after fm_lock_try_acquire returns.
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    fm_lock_holder_is_current "$lockdir" "$FM_LOCK_HELD_PID" || true
   fi
   fm_lock_release "$steal"
   return "$rc"
