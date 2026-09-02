@@ -1456,6 +1456,210 @@ test_lock_stale_record_with_identity_and_no_process_is_reclaimed() {
   pass "a recorded holder with no process left is reclaimed"
 }
 
+# Run the shared identity predicate against one recorded string and report the
+# return code, the verdict, and whether that verdict is accepted as PROOF.
+identity_verdict_probe() {  # <state> <recorded> <pid>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    if fm_identity_holder_is_current "$2" "$3"; then rc=0; else rc=1; fi
+    if fm_identity_proves_same_process "$FM_IDENTITY_PROOF"; then proves=yes; else proves=no; fi
+    printf "rc=%s proof=%s proves=%s\n" "$rc" "$FM_IDENTITY_PROOF" "$proves"
+  ' _ "$LIB" "$2" "$3"
+}
+
+# Rewrite the COMMAND half of an identity, preserving its start-time half, in
+# whichever of the two forms fm_pid_identity produced. This is the exec-replaced
+# holder as a pure string, so the case runs identically on a /proc host and on a
+# ps-only one.
+identity_with_other_command() {  # <identity>
+  local identity=$1
+  local -a fields
+  case "$identity" in
+    *" cmdline-hex="*) printf '%s cmdline-hex=00\n' "${identity%% cmdline-hex=*}"; return 0 ;;
+  esac
+  read -r -a fields <<< "$identity"
+  [ "${#fields[@]}" -ge 5 ] || return 1
+  printf '%s %s %s %s %s /some/other/command\n' \
+    "${fields[0]}" "${fields[1]}" "${fields[2]}" "${fields[3]}" "${fields[4]}"
+}
+
+# The predicate three re-implementations were bypassing, asserted directly:
+# every verdict, and - the part each re-derivation got differently - which
+# verdicts are merely "not disproved" and which are actual proof. A caller that
+# signals a pid may act only on the second kind.
+test_identity_predicate_separates_held_from_proved() {
+  local dir state live current cross other out
+  dir=$(make_case identity-predicate)
+  state="$dir/state"
+  mkdir -p "$state"
+
+  sleep 30 &
+  live=$!
+  current=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || { kill "$live" 2>/dev/null || true; fail "no identity could be computed for a live process"; }
+
+  out=$(identity_verdict_probe "$state" "$current" "$live")
+  [ "$out" = "rc=0 proof=identity proves=yes" ] \
+    || { kill "$live" 2>/dev/null || true; fail "a live process re-reading its own identity was not proved: $out"; }
+
+  # Same pid, same start time, different command: the exec-replaced holder.
+  # Held AND proved - a bash process legitimately replaces its own command.
+  other=$(identity_with_other_command "$current") \
+    || { kill "$live" 2>/dev/null || true; fail "could not build a command-only divergence from '$current'"; }
+  [ "$other" != "$current" ] \
+    || { kill "$live" 2>/dev/null || true; fail "command-divergence fixture did not actually diverge"; }
+  out=$(identity_verdict_probe "$state" "$other" "$live")
+  [ "$out" = "rc=0 proof=identity-start-only proves=yes" ] \
+    || { kill "$live" 2>/dev/null || true; fail "a command change was not accepted on start time alone: $out"; }
+
+  # An identity recorded in the OTHER form - what a record written by a build
+  # before this consolidation holds in a live home. Not comparable, so it is
+  # not disproved (the record keeps its holder) but it is NOT proof either, so
+  # nothing may signal that pid on it.
+  case "$current" in
+    *" cmdline-hex="*) cross='Tue Aug  4 10:00:00 2026 /bin/sleep 30' ;;
+    *) cross='proc-starttime=12345 cmdline-hex=00' ;;
+  esac
+  out=$(identity_verdict_probe "$state" "$cross" "$live")
+  [ "$out" = "rc=0 proof=unprovable proves=no" ] \
+    || { kill "$live" 2>/dev/null || true; fail "a cross-form recorded identity was not held-but-unproved: $out"; }
+
+  # Nothing recorded at all: same split.
+  out=$(identity_verdict_probe "$state" "" "$live")
+  [ "$out" = "rc=0 proof=liveness-only proves=no" ] \
+    || { kill "$live" 2>/dev/null || true; fail "an unrecorded identity was not held-but-unproved: $out"; }
+
+  # A start time that is not this process's: a reused pid, and the one shape
+  # that is actively disproved.
+  case "$current" in
+    *" cmdline-hex="*) cross="${current%% *}" ; cross="proc-starttime=$(( ${cross#*=} + 1 )) cmdline-hex=00" ;;
+    *) cross='Tue Aug  4 10:00:00 2026 /bin/sleep 30' ;;
+  esac
+  out=$(identity_verdict_probe "$state" "$cross" "$live")
+  [ "$out" = "rc=1 proof=mismatch proves=no" ] \
+    || { kill "$live" 2>/dev/null || true; fail "a different start time was not read as a reused pid: $out"; }
+
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  out=$(identity_verdict_probe "$state" "$current" "$(dead_pid)")
+  [ "$out" = "rc=1 proof=dead proves=no" ] \
+    || fail "an absent process was not read as dead: $out"
+
+  pass "the shared identity predicate separates not-disproved from proved"
+}
+
+# The shape every caller that records an identity for a process it just started
+# actually hits: the identity is taken the instant after the fork, so it
+# describes the pre-exec command, and the process then replaces that command
+# while continuing to be the same process. Recorded and re-read against a REAL
+# exec rather than a rewritten string, because the string fixture above can
+# only confirm the rule already written into it.
+#
+# This is what makes identity-start-only load-bearing rather than a curiosity:
+# a caller that demanded whole-identity equality here would fail to recognise
+# every process it had started itself.
+test_identity_survives_the_recorded_process_exec() {
+  local dir state child recorded out waited=0
+  dir=$(make_case identity-after-exec)
+  state="$dir/state"
+  mkdir -p "$state"
+  mkfifo "$dir/gate" || fail "could not create the exec gate"
+
+  # Ordering is the point: the child blocks before its exec, the identity is
+  # recorded while it is still bash, and only then is it released to exec.
+  bash -c 'read -r _ < "$0"; exec sleep 30' "$dir/gate" &
+  child=$!
+  recorded=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$child") \
+    || { printf 'go\n' > "$dir/gate"; kill "$child" 2>/dev/null || true; fail "no identity could be recorded for a just-started process"; }
+
+  printf 'go\n' > "$dir/gate"
+  while [ "$waited" -lt 100 ]; do
+    case "$(ps -p "$child" -o comm= 2>/dev/null || true)" in sleep) break ;; esac
+    waited=$((waited + 1))
+    sleep 0.05
+  done
+  case "$(ps -p "$child" -o comm= 2>/dev/null || true)" in
+    sleep) ;;
+    bash) kill "$child" 2>/dev/null || true; fail "the fixture never reached its exec, so this case would pass vacuously" ;;
+    *) kill "$child" 2>/dev/null || true; fail "the fixture's child was in an unexpected state before its exec" ;;
+  esac
+
+  out=$(identity_verdict_probe "$state" "$recorded" "$child")
+  kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+
+  case "$out" in
+    "rc=0 proof=identity proves=yes"|"rc=0 proof=identity-start-only proves=yes") ;;
+    *) fail "a process that exec'd after its identity was recorded was no longer proved: $out" ;;
+  esac
+
+  pass "a recorded identity still proves the process after it replaces its command"
+}
+
+# fm_pid_identity's /proc branch hex-encodes the cmdline with od; the ps form
+# needs no such tool. A host, or a restricted PATH, without od must therefore
+# still yield an identity by falling through - because a caller that receives NO
+# identity cannot prove anything, and every proof-required site then silently
+# skips the work it exists to do. That is what stopped teardown reaping a leaked
+# process group on Linux: tests/fm-teardown.test.sh's lsof-absent fixture builds
+# an allowlisted PATH carrying ps but not od.
+#
+# FM_PROC_ROOT_OVERRIDE is what makes this portable. It drives the /proc branch
+# on hosts that have no real /proc, so the fallback is pinned on every platform
+# CI runs rather than only where the bug happened to reproduce.
+test_identity_falls_back_when_od_is_unavailable() {
+  local dir state child proc_root path_no_od out_without out_with cmd resolved
+  dir=$(make_case identity-od-absent)
+  state="$dir/state"
+  mkdir -p "$state"
+
+  sleep 30 &
+  child=$!
+
+  proc_root="$dir/proc"
+  mkdir -p "$proc_root/$child"
+  printf '%s (sleep) S 1 %s %s 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 987654 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' \
+    "$child" "$child" "$child" > "$proc_root/$child/stat"
+  printf 'sleep\0' > "$proc_root/$child/cmdline"
+
+  path_no_od="$dir/path-no-od"
+  mkdir -p "$path_no_od"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find grep head id ln \
+    mkdir mktemp mv ps readlink realpath rm sed sh sleep sort stat tail tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_no_od/$cmd" ;; esac
+  done
+  if PATH="$path_no_od" command -v od >/dev/null 2>&1; then
+    kill "$child" 2>/dev/null || true
+    fail "the od-absent fixture PATH still exposes od, so this case would be vacuous"
+  fi
+
+  # Anti-vacuity: with od present the SAME fixture must take the /proc branch and
+  # emit the proc form. Without this, a fallback that never entered /proc at all
+  # would still satisfy the assertion below.
+  out_with=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$child") \
+    || out_with=""
+  case "$out_with" in
+    *starttime=987654*cmdline-hex=*) ;;
+    *) kill "$child" 2>/dev/null || true
+       fail "the fixture did not exercise the /proc branch with od present: '$out_with'" ;;
+  esac
+
+  out_without=$(PATH="$path_no_od" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$child") || out_without=""
+  kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+
+  [ -n "$out_without" ] \
+    || fail "no identity at all was produced without od; every proof-required caller would silently skip its work"
+  case "$out_without" in
+    *cmdline-hex=*) fail "expected the ps fallback without od, got the proc form: '$out_without'" ;;
+  esac
+
+  pass "an identity is still produced when od is unavailable to the /proc branch"
+}
+
 test_lock_unprovable_identity_is_not_stolen() {
   local dir state lockdir holder fakebin no_proc probe out
   dir=$(make_case lock-unprovable-identity)
@@ -1547,6 +1751,9 @@ test_lock_live_holder_is_not_stolen_when_idle
 test_lock_recycled_pid_does_not_read_as_holder
 test_lock_identity_key_label_does_not_veto_a_held_lock
 test_lock_stale_record_with_identity_and_no_process_is_reclaimed
+test_identity_predicate_separates_held_from_proved
+test_identity_survives_the_recorded_process_exec
+test_identity_falls_back_when_od_is_unavailable
 test_lock_unprovable_identity_is_not_stolen
 test_lock_without_recorded_identity_is_not_stolen
 test_lock_empty_pid_uses_minimum_grace

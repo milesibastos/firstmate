@@ -178,7 +178,7 @@ test_completed_turn_no_report_triggers_one_recovery() {
 }
 
 test_recovery_attempt_is_never_reinjected() {
-  local home state corr rec hook_log lines live_corr live_rec live_pid live_identity
+  local home state corr rec hook_log lines live_corr live_rec live_pid live_identity stale_identity
   home=$(setup_parent recovery-at-most-once)
   state="$home/state"
   hook_log="$TMP_ROOT/recovery-at-most-once.log"
@@ -214,8 +214,12 @@ test_recovery_attempt_is_never_reinjected() {
   fm_pending_reply_mark_turn_completed "$state" "$live_corr" request
   live_rec=$(fm_pending_reply_path "$state" "$live_corr")
   live_pid=${BASHPID:-$$}
-  live_identity=$(fm_pending_reply_pid_identity "$live_pid") \
+  # Computed the way the library computes it, in a child so the identity owner's
+  # own load-time variables never land in this test shell.
+  live_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$live_pid") \
     || fail "live sender identity should be observable"
+  [ -n "$live_identity" ] || fail "live sender identity should not be empty"
   fm_pending_reply_set "$live_rec" recovery_attempted_epoch 2500 || fail "live attempt precommit failed"
   fm_pending_reply_set "$live_rec" recovery_sender_pid "$live_pid" || fail "live sender pid commit failed"
   fm_pending_reply_set "$live_rec" recovery_sender_identity "$live_identity" \
@@ -224,6 +228,22 @@ test_recovery_attempt_is_never_reinjected() {
   fm_pending_reply_tick_one "$state" "$live_corr" unknown || fail "live recovery tick failed"
   [ "$(phase_of "$state" "$live_corr")" = recovery_sending ] \
     || fail "live recovery must remain in progress without elapsed-time inference"
+  # A sender whose recorded identity this build can no longer compare - a record
+  # written before the identity format was consolidated, or a host that stopped
+  # answering the identity question. Unprovable is not "gone": reconciling here
+  # would take a request away from a sender that is still working on it.
+  case "$live_identity" in
+    *" cmdline-hex="*) stale_identity='Tue Aug  4 10:00:00 2026 /bin/sleep 30' ;;
+    *) stale_identity='proc-starttime=12345 cmdline-hex=00' ;;
+  esac
+  [ "$stale_identity" != "$live_identity" ] \
+    || fail "unprovable-identity fixture did not actually diverge in form"
+  fm_pending_reply_set "$live_rec" recovery_sender_identity "$stale_identity" \
+    || fail "unprovable sender identity commit failed"
+  fm_pending_reply_tick_one "$state" "$live_corr" unknown \
+    || fail "unprovable-identity recovery tick failed"
+  [ "$(phase_of "$state" "$live_corr")" = recovery_sending ] \
+    || fail "a live sender whose identity could not be re-proved was reconciled away"
   corr=$(fm_pending_reply_create "$home" "$state" hibit "crashed recovery")
   fm_pending_reply_mark_delivered "$state" "$corr"
   fm_pending_reply_mark_turn_completed "$state" "$corr" request

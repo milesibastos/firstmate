@@ -355,11 +355,30 @@ worker_stop_recorded_execution() { # <job-dir>
     "$job/.claim/group" "$job/.claim/group_start" "$job/.claim/armed"
 }
 
-# Stop every tracked lane process and its recorded command execution. The lane
-# is signalled first so it cannot dispatch further work, then the job's
-# recorded supervisor and group are verified stopped; a job interrupted here
-# stays running-with-a-dead-owner for the replacement worker's orphan recovery,
-# exactly as a crashed single-process worker's job did.
+# DELIBERATELY on this subsystem's own fm_remote_job_process_start rather than
+# on the fleet-wide identity owner in bin/fm-wake-lib.sh (fm_pid_identity and
+# fm_identity_holder_is_current). This is not an oversight, and consolidating it
+# was tried and declined - please do not "fix" it.
+#
+# The fleet-wide owner is the right one to reach for in general, and the
+# hand-rolled identity proofs in bin/fm-teardown.sh and
+# bin/fm-pending-reply-lib.sh were retired onto it. This site is different: it
+# does not re-derive an identity, it consumes the primitive this subsystem
+# already owns at a dozen other call sites, several of which record into DURABLE
+# files (.claim/supervisor_start, .claim/group_start, .owner-start, and the
+# ownership lock's start/command) that one process writes and another, possibly
+# older, build re-reads. Moving only this site would leave two identity notions
+# adjacent in one file; moving all of them is a migration with its own upgrade
+# windows, tracked separately.
+#
+# The concrete obstacle, so it does not have to be rediscovered: this worker
+# deliberately sources exactly one library, and the remote roots it runs from in
+# tests/fm-remote-job.test.sh carry only the remote-job scripts. Reaching the
+# fleet-wide owner from here therefore costs either a new dependency for a
+# process that runs on a remote machine, or copies of a shared library into test
+# fixtures - and an uncoordinated copy of a shared library is the exact defect
+# this subsystem's self-containment avoids. fm_remote_job_path_mtime, which
+# mirrors fm_path_mtime for the same reason, is the existing precedent.
 worker_lane_identity_matches() { # <pid> <start>
   local pid=$1 start=$2 actual_start
   [ -n "$start" ] || return 1
@@ -367,6 +386,11 @@ worker_lane_identity_matches() { # <pid> <start>
   [ "$actual_start" = "$start" ]
 }
 
+# Stop every tracked lane process and its recorded command execution. The lane
+# is signalled first so it cannot dispatch further work, then the job's
+# recorded supervisor and group are verified stopped; a job interrupted here
+# stays running-with-a-dead-owner for the replacement worker's orphan recovery,
+# exactly as a crashed single-process worker's job did.
 worker_stop_active_execution() {
   local i=0 count=${#WORKER_LANE_PIDS[@]} job pid start failed=0
   while [ "$i" -lt "$count" ]; do

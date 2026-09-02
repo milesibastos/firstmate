@@ -49,21 +49,37 @@ fm_pid_identity() {
   # full NUL-separated cmdline keeps PID reuse a mismatch even on a tick collision.
   # Git Bash/MSYS exposes these compatible files but its Cygwin ps rejects the
   # portable fallback's -o fields, so capability detection must not key on uname.
+  # A /proc that cannot be turned into an identity FALLS THROUGH to the ps form
+  # below rather than failing the whole call. This branch needs od, which the ps
+  # form does not, so a host or a restricted PATH without od would otherwise get
+  # NO identity at all - and a caller that cannot compute one cannot prove
+  # anything, which reads as "leave it alone" at every proof-required site.
+  # tests/fm-teardown.test.sh's lsof-absent case is exactly that shape: its
+  # allowlisted PATH has ps but no od, so on Linux teardown stopped reaping a
+  # leaked process group it had correctly reaped before. Neither emitted format
+  # changes here, so identities already recorded in live homes keep comparing as
+  # they did; a record written in one form and re-read in the other is already
+  # handled as unprovable rather than as a mismatch.
   if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || stat_line=
     # After the final comm delimiter, array index 19 is proc stat field 22.
     read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in
-      ''|*[!0-9]*) return 1 ;;
-    esac
-    cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
-    [ -n "$cmdline_hex" ] || return 1
-    identity_key=proc-starttime
-    [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
-    printf '%s=%s cmdline-hex=%s\n' "$identity_key" "$starttime" "$cmdline_hex"
-    return 0
+    starttime=
+    if [ -n "$stat_line" ] && [ "${#stat_fields[@]}" -ge 20 ]; then
+      starttime=${stat_fields[19]}
+      case "$starttime" in
+        ''|*[!0-9]*) starttime= ;;
+      esac
+    fi
+    if [ -n "$starttime" ]; then
+      cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]')
+      if [ -n "$cmdline_hex" ]; then
+        identity_key=proc-starttime
+        [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
+        printf '%s=%s cmdline-hex=%s\n' "$identity_key" "$starttime" "$cmdline_hex"
+        return 0
+      fi
+    fi
   fi
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
   # written under one locale but re-read under the machine's ambient locale, which
@@ -437,8 +453,15 @@ fm_identity_start_component() {
     "${fields[0]}" "${fields[1]}" "${fields[2]}" "${fields[3]}" "${fields[4]}"
 }
 
-# fm_lock_holder_is_current <lockdir> <pid>
-# True while <pid> is still the process that took <lockdir>.
+# fm_identity_holder_is_current <recorded-identity> <pid>
+# True while <pid> has not been DISPROVED to be the process that recorded
+# <recorded-identity> with fm_pid_identity. An empty <recorded-identity> means
+# nothing was recorded to check.
+#
+# This is the one owner of "is this still the same process". Every caller that
+# holds a recorded identity - a lock, a durable record, or an in-memory scan
+# result - must compare through here rather than re-deriving the rule, because
+# each re-derivation of it has landed a different, weaker proof.
 #
 # IDENTITY ONLY. This answers "is this the same process", never "has it made
 # progress recently": it reads no mtime, no heartbeat, and no age. A correct
@@ -447,19 +470,32 @@ fm_identity_start_component() {
 # shipped one layer up). Freshness stays where it belongs, in the separately
 # named fm_lock_mid_acquire_is_fresh and in each caller's own staleness proof.
 #
-# Sets FM_LOCK_HOLDER_PROOF to the evidence behind the verdict:
-#   identity      held, and the whole recorded identity recomputed and matched
+# Sets FM_IDENTITY_PROOF to the evidence behind the verdict:
+#   identity      same process, and the whole recorded identity recomputed and
+#                 matched
 #   identity-start-only
-#                 held on start time alone: same process, different command (see
-#                 the bash note below)
-#   liveness-only held, but the lock records no identity to check (a lock taken
-#                 by an older build, or on a host where no identity fact could
-#                 be computed at acquisition)
-#   unprovable    held, an identity IS recorded, but it cannot be recomputed now
-#                 or cannot be compared with what is recorded
-#   mismatch      NOT held: the pid started at a different time, so the recorded
-#                 holder is gone and this pid was reused
-#   dead          NOT held: no such process
+#                 same process on start time alone: different command (see the
+#                 bash note below)
+#   liveness-only alive, but nothing was recorded to check (a record written by
+#                 an older build, or on a host where no identity fact could be
+#                 computed when it was written)
+#   unprovable    alive, an identity IS recorded, but it cannot be recomputed
+#                 now or cannot be compared with what is recorded
+#   mismatch      NOT the same process: it started at a different time, so the
+#                 recorded process is gone and this pid was reused
+#   dead          NOT the same process: no such process
+#
+# THE RETURN CODE IS DELIBERATELY PERMISSIVE, and callers must not treat it as
+# proof. It is 0 for every verdict this function could not DISPROVE, which
+# includes liveness-only and unprovable. A caller whose next step is destructive
+# - signalling the pid, stealing its lock, reconciling its work away - must read
+# FM_IDENTITY_PROOF and require the verdict its own safe direction needs:
+#   - stealing from a holder is unsafe, so a lock keeps the permissive return:
+#     an unprovable holder stays held.
+#   - signalling a pid is unsafe, so a reaper requires identity or
+#     identity-start-only and leaves everything else alone.
+# Both are the same rule - never take the destructive action without proof - and
+# they read opposite here only because they destroy opposite things.
 #
 # START TIME DECIDES; THE COMMAND ONLY CORROBORATES. A shell replaces itself
 # with the last simple command of its script, so the ordinary holder idiom
@@ -481,14 +517,13 @@ fm_identity_start_component() {
 # (fm_pid_identity above) renders under the checker's inherited TZ, which is
 # not pinned the way LC_ALL is, so two processes reading the same live holder
 # under different TZ settings compute different start-time components. That
-# matters more after this change than before: start time now DECIDES this
-# verdict, and the comparison runs at every lock acquire rather than the four
-# identity call sites it used to, so a TZ mismatch would evict a live holder -
-# the too-strict direction this whole change exists to avoid. Not fixed here
-# because pinning TZ would change what fm_pid_identity emits, and identities
-# already recorded by running processes and by locks already held in live
-# homes must keep matching what new code computes; that needs its own
-# migration, not a quiet edit.
+# matters more since start time began deciding this verdict, and the comparison
+# runs at every lock acquire rather than the four identity call sites it used
+# to, so a TZ mismatch would evict a live holder - the too-strict direction
+# this check exists to avoid. Not fixed here because pinning TZ would change
+# what fm_pid_identity emits, and identities already recorded by running
+# processes and by records already written in live homes must keep matching
+# what new code computes; that needs its own migration, not a quiet edit.
 #
 # The two unproven-but-held verdicts fail SAFE toward the current holder.
 # Refusing to steal a lock whose ownership cannot be disproved leaves recovery
@@ -500,44 +535,70 @@ fm_identity_start_component() {
 # That permissive direction is the precedent fm_autoarm_release_abandoned below
 # already sets, not a new rule: there too, missing identity evidence disables
 # the dangerous action rather than authorizing it. It also carries the fleet
-# through the upgrade window, where every lock already held in a live home has
-# no recorded identity and must keep reading as held.
-FM_LOCK_HOLDER_PROOF=
-fm_lock_holder_is_current() {
-  local lockdir=$1 pid=$2 recorded current recorded_start current_start
-  FM_LOCK_HOLDER_PROOF=dead
+# through every upgrade window, where a record written by an older build either
+# carries no identity at all or carries one in a form the current build no
+# longer emits, and must keep reading as held either way.
+FM_IDENTITY_PROOF=
+fm_identity_holder_is_current() {
+  local recorded=$1 pid=$2 current recorded_start current_start
+  FM_IDENTITY_PROOF=dead
   fm_pid_alive "$pid" || return 1
-  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   if [ -z "$recorded" ]; then
-    FM_LOCK_HOLDER_PROOF=liveness-only
+    FM_IDENTITY_PROOF=liveness-only
     return 0
   fi
   if ! current=$(fm_pid_identity "$pid" 2>/dev/null) || [ -z "$current" ]; then
-    FM_LOCK_HOLDER_PROOF=unprovable
+    FM_IDENTITY_PROOF=unprovable
     return 0
   fi
   if [ "$current" = "$recorded" ]; then
-    FM_LOCK_HOLDER_PROOF=identity
+    FM_IDENTITY_PROOF=identity
     return 0
   fi
   # The strings differ. Only the start-time half decides.
   if ! recorded_start=$(fm_identity_start_component "$recorded") \
     || ! current_start=$(fm_identity_start_component "$current"); then
-    FM_LOCK_HOLDER_PROOF=unprovable
+    FM_IDENTITY_PROOF=unprovable
     return 0
   fi
   # Identities recorded in one form and re-read in the other carry no comparable
   # fact, so they are unprovable rather than proof of a reused pid.
   if [ "${recorded_start%% *}" != "${current_start%% *}" ]; then
-    FM_LOCK_HOLDER_PROOF=unprovable
+    FM_IDENTITY_PROOF=unprovable
     return 0
   fi
   if [ "$recorded_start" != "$current_start" ]; then
-    FM_LOCK_HOLDER_PROOF=mismatch
+    FM_IDENTITY_PROOF=mismatch
     return 1
   fi
-  FM_LOCK_HOLDER_PROOF='identity-start-only'
+  FM_IDENTITY_PROOF='identity-start-only'
   return 0
+}
+
+# fm_identity_proves_same_process <proof>
+# True when a FM_IDENTITY_PROOF verdict actually ESTABLISHED that the pid is the
+# recorded process, rather than merely failing to disprove it. This is the gate
+# every caller whose next step signals that pid must pass; see the return-code
+# note on fm_identity_holder_is_current.
+fm_identity_proves_same_process() {
+  case "$1" in
+    identity|identity-start-only) return 0 ;;
+  esac
+  return 1
+}
+
+# fm_lock_holder_is_current <lockdir> <pid>
+# True while <pid> is still the process that took <lockdir>, reading the
+# identity the holder recorded at acquisition. Verdicts, the permissive return
+# code, and the reasoning behind both belong to fm_identity_holder_is_current
+# above; FM_LOCK_HOLDER_PROOF is that verdict under this caller's own name.
+FM_LOCK_HOLDER_PROOF=
+fm_lock_holder_is_current() {
+  local lockdir=$1 pid=$2 recorded rc
+  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  if fm_identity_holder_is_current "$recorded" "$pid"; then rc=0; else rc=$?; fi
+  FM_LOCK_HOLDER_PROOF=$FM_IDENTITY_PROOF
+  return "$rc"
 }
 
 fm_lock_claim_blocked_by_steal() {
