@@ -608,20 +608,15 @@ cmd_run() {
     return 1
   fi
   if ! fm_lock_try_acquire "$DAEMON_LOCK"; then
-    # PUBLISHER-LOCAL IDENTITY GUARD. fm_lock_try_acquire (bin/fm-wake-lib.sh) is
-    # the shared singleton-lock primitive roughly twenty scripts rely on, and it
-    # treats a lock as legitimately held whenever the recorded pid is merely
-    # alive (fm_pid_alive) - it has no start-time or cmdline binding. A daemon
-    # killed right after the kernel recycles its pid to an unrelated live
-    # process therefore still blocks recovery here even though daemon_identity
-    # (which DOES bind identity) correctly reports no publisher running. This
-    # guard closes that gap for THIS home's daemon lock only, by re-proving the
-    # lock's recorded holder with daemon_identity before treating a failed
-    # acquire as proof a real publisher is up. Fixing fm_pid_alive/
-    # fm_lock_try_acquire itself is a separate task with a different blast
-    # radius (it also gates the watcher and every other home in the fleet) and
-    # is filed on its own; do not delete this guard as redundant when that
-    # lands, and do not assume it protects more than this one lock.
+    # PUBLISHER-LOCAL IDENTITY GUARD. fm_lock_try_acquire (bin/fm-wake-lib.sh) now
+    # proves the recorded holder's identity by start time (fm_lock_holder_is_current)
+    # rather than mere pid liveness, closing the generic recycled-pid gap this guard
+    # was written to cover for every lock in the fleet. This guard still adds value
+    # beyond that generic check: daemon_identity binds a stronger, publisher-specific
+    # fact - a rotating beacon token plus the publisher's own command shape
+    # (proc_is_publisher) - not just start time, so it re-proves the lock's recorded
+    # holder with daemon_identity before treating a failed acquire as proof a real
+    # publisher is up. Do not assume it protects more than this one lock.
     # This proves IDENTITY ONLY, deliberately not daemon_state's freshness gate:
     # a live, correctly-identified publisher whose beacon has merely gone stale
     # (a laptop suspending mid-sleep, a slow snapshot read) is still the
