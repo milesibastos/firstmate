@@ -679,9 +679,11 @@ test_stale_diagnostic_wedge_survives_busy_housekeeping() {
 # The second half of issue #3149. The watcher's wedge timer emits an enriched
 # "idle Ns, possible wedge, escalation N" reason for any pane it reads as frozen -
 # including one whose crew has a CURRENT declared wait, because the watcher's own
-# provably-working classification and the crew's status line can disagree (a crew
-# that declares `paused:` while its no-mistakes run is still attributed to its code
-# reads `working` to pause_state_class and takes the wedge timer). handle_wake's
+# provably-working classification and the crew's status line can disagree (the
+# declaration may be appended after the wedge ladder has already fired on that
+# pane, or the reason may have been produced before the declaration landed; which
+# liveness evidence admits a standing declaration to the watcher's bounded pause
+# cadence is owned by bin/fm-watch.sh's pause_state_class header). handle_wake's
 # enriched-wedge override force-escalated every such reason, discarding the `pause`
 # verdict classify_stale had already returned for the same pane, so a healthy
 # declared wait was escalated once per STALE_ESCALATE_SECS for as long as it lasted.
