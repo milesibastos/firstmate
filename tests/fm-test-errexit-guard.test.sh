@@ -30,8 +30,7 @@ sample_test() {
 }
 
 sample_test
-fm_test_assert_no_errexit_leak sample_test
-pass "sample test reported"
+pass "sample_test"
 PROBE
   chmod +x "$path"
 }
@@ -42,7 +41,7 @@ write_probe "$TMP_ROOT/clean.sh" ':'
 clean_out=$(bash "$TMP_ROOT/clean.sh" 2> "$TMP_ROOT/clean.err")
 clean_rc=$?
 expect_code 0 "$clean_rc" "a suite that never touches errexit was refused by the guard"
-assert_contains "$clean_out" 'ok - sample test reported' "the clean suite did not report its test"
+assert_contains "$clean_out" 'ok - sample_test' "the clean suite did not report its test"
 [ ! -s "$TMP_ROOT/clean.err" ] || fail "the clean suite produced unexpected diagnostics: $(cat "$TMP_ROOT/clean.err")"
 pass "a suite that leaves errexit off runs untouched"
 
@@ -55,7 +54,7 @@ leaked_rc=$?
 [ "$leaked_rc" -ne 0 ] || fail "an injected errexit leak was not refused"
 assert_grep 'not ok - errexit leaked out of sample_test' "$TMP_ROOT/leaked.err" \
   "the refusal did not name the test that leaked errexit"
-assert_not_contains "$leaked_out" 'ok - sample test reported' \
+assert_not_contains "$leaked_out" 'ok - sample_test' \
   "the leaking suite still reported its test as passing"
 pass "an injected errexit leak is refused and names the test that leaked it"
 
@@ -71,7 +70,7 @@ if [ -n "$listed_suite" ]; then
   listed_out=$(bash "$TMP_ROOT/$listed_suite" 2> "$TMP_ROOT/listed.err")
   listed_rc=$?
   expect_code 0 "$listed_rc" "an allowlisted suite was refused for a leak it is still listed for"
-  assert_contains "$listed_out" 'ok - sample test reported' "the allowlisted suite did not report its test"
+  assert_contains "$listed_out" 'ok - sample_test' "the allowlisted suite did not report its test"
   assert_no_grep 'errexit leaked out of' "$TMP_ROOT/listed.err" \
     "the allowlisted suite was still told its leak was fatal"
   pass "a suite still on the allowlist keeps running while its leak is worked off"
