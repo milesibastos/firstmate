@@ -1456,6 +1456,99 @@ test_lock_stale_record_with_identity_and_no_process_is_reclaimed() {
   pass "a recorded holder with no process left is reclaimed"
 }
 
+# Run the shared identity predicate against one recorded string and report the
+# return code, the verdict, and whether that verdict is accepted as PROOF.
+identity_verdict_probe() {  # <state> <recorded> <pid>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    if fm_identity_holder_is_current "$2" "$3"; then rc=0; else rc=1; fi
+    if fm_identity_proves_same_process "$FM_IDENTITY_PROOF"; then proves=yes; else proves=no; fi
+    printf "rc=%s proof=%s proves=%s\n" "$rc" "$FM_IDENTITY_PROOF" "$proves"
+  ' _ "$LIB" "$2" "$3"
+}
+
+# Rewrite the COMMAND half of an identity, preserving its start-time half, in
+# whichever of the two forms fm_pid_identity produced. This is the exec-replaced
+# holder as a pure string, so the case runs identically on a /proc host and on a
+# ps-only one.
+identity_with_other_command() {  # <identity>
+  local identity=$1
+  local -a fields
+  case "$identity" in
+    *" cmdline-hex="*) printf '%s cmdline-hex=00\n' "${identity%% cmdline-hex=*}"; return 0 ;;
+  esac
+  read -r -a fields <<< "$identity"
+  [ "${#fields[@]}" -ge 5 ] || return 1
+  printf '%s %s %s %s %s /some/other/command\n' \
+    "${fields[0]}" "${fields[1]}" "${fields[2]}" "${fields[3]}" "${fields[4]}"
+}
+
+# The predicate three re-implementations were bypassing, asserted directly:
+# every verdict, and - the part each re-derivation got differently - which
+# verdicts are merely "not disproved" and which are actual proof. A caller that
+# signals a pid may act only on the second kind.
+test_identity_predicate_separates_held_from_proved() {
+  local dir state live current cross other out
+  dir=$(make_case identity-predicate)
+  state="$dir/state"
+  mkdir -p "$state"
+
+  sleep 30 &
+  live=$!
+  current=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || { kill "$live" 2>/dev/null || true; fail "no identity could be computed for a live process"; }
+
+  out=$(identity_verdict_probe "$state" "$current" "$live")
+  [ "$out" = "rc=0 proof=identity proves=yes" ] \
+    || { kill "$live" 2>/dev/null || true; fail "a live process re-reading its own identity was not proved: $out"; }
+
+  # Same pid, same start time, different command: the exec-replaced holder.
+  # Held AND proved - a bash process legitimately replaces its own command.
+  other=$(identity_with_other_command "$current") \
+    || { kill "$live" 2>/dev/null || true; fail "could not build a command-only divergence from '$current'"; }
+  [ "$other" != "$current" ] \
+    || { kill "$live" 2>/dev/null || true; fail "command-divergence fixture did not actually diverge"; }
+  out=$(identity_verdict_probe "$state" "$other" "$live")
+  [ "$out" = "rc=0 proof=identity-start-only proves=yes" ] \
+    || { kill "$live" 2>/dev/null || true; fail "a command change was not accepted on start time alone: $out"; }
+
+  # An identity recorded in the OTHER form - what a record written by a build
+  # before this consolidation holds in a live home. Not comparable, so it is
+  # not disproved (the record keeps its holder) but it is NOT proof either, so
+  # nothing may signal that pid on it.
+  case "$current" in
+    *" cmdline-hex="*) cross='Tue Aug  4 10:00:00 2026 /bin/sleep 30' ;;
+    *) cross='proc-starttime=12345 cmdline-hex=00' ;;
+  esac
+  out=$(identity_verdict_probe "$state" "$cross" "$live")
+  [ "$out" = "rc=0 proof=unprovable proves=no" ] \
+    || { kill "$live" 2>/dev/null || true; fail "a cross-form recorded identity was not held-but-unproved: $out"; }
+
+  # Nothing recorded at all: same split.
+  out=$(identity_verdict_probe "$state" "" "$live")
+  [ "$out" = "rc=0 proof=liveness-only proves=no" ] \
+    || { kill "$live" 2>/dev/null || true; fail "an unrecorded identity was not held-but-unproved: $out"; }
+
+  # A start time that is not this process's: a reused pid, and the one shape
+  # that is actively disproved.
+  case "$current" in
+    *" cmdline-hex="*) cross="${current%% *}" ; cross="proc-starttime=$(( ${cross#*=} + 1 )) cmdline-hex=00" ;;
+    *) cross='Tue Aug  4 10:00:00 2026 /bin/sleep 30' ;;
+  esac
+  out=$(identity_verdict_probe "$state" "$cross" "$live")
+  [ "$out" = "rc=1 proof=mismatch proves=no" ] \
+    || { kill "$live" 2>/dev/null || true; fail "a different start time was not read as a reused pid: $out"; }
+
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  out=$(identity_verdict_probe "$state" "$current" "$(dead_pid)")
+  [ "$out" = "rc=1 proof=dead proves=no" ] \
+    || fail "an absent process was not read as dead: $out"
+
+  pass "the shared identity predicate separates not-disproved from proved"
+}
+
 test_lock_unprovable_identity_is_not_stolen() {
   local dir state lockdir holder fakebin no_proc probe out
   dir=$(make_case lock-unprovable-identity)
@@ -1547,6 +1640,7 @@ test_lock_live_holder_is_not_stolen_when_idle
 test_lock_recycled_pid_does_not_read_as_holder
 test_lock_identity_key_label_does_not_veto_a_held_lock
 test_lock_stale_record_with_identity_and_no_process_is_reclaimed
+test_identity_predicate_separates_held_from_proved
 test_lock_unprovable_identity_is_not_stolen
 test_lock_without_recorded_identity_is_not_stolen
 test_lock_empty_pid_uses_minimum_grace
