@@ -1,0 +1,20 @@
+=== Probe script (wake-helpers.sh make_case; fakebin/tmux pre-created as a directory so mkdir -p succeeds but 'cat > ... <<SH' fails) ===
+#!/usr/bin/env bash
+set -u
+cd tests
+TMP_ROOT=$(mktemp -d)
+. lib.sh
+. wake-helpers.sh
+
+# Pre-create fakebin/tmux as a DIRECTORY so mkdir -p succeeds
+# but `cat > "$fakebin/tmux"` fails with "Is a directory".
+mkdir -p "$TMP_ROOT/heredoc-case/fakebin/tmux"
+
+dir=$(make_case heredoc-case) || fail "the heredoc-case fixture could not be built"
+echo "unreachable: dir=$dir"
+
+=== Execution ===
+wake-helpers.sh: line 61: /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/tmp.1rXbGkX1ks/heredoc-case/fakebin/tmux: Is a directory
+not ok - case fixture heredoc-case: the fake tmux could not be written
+not ok - the heredoc-case fixture could not be built
+SCRIPT_EXIT=1

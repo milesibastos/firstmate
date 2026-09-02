@@ -1,0 +1,27 @@
+=== Probe script (tests/lib.sh sourced; fm_fakebin called against a chmod-000 directory) ===
+#!/usr/bin/env bash
+set -u
+. tests/lib.sh
+
+blocked=$(mktemp -d)
+chmod 000 "$blocked"
+
+echo "--- calling fm_fakebin directly against blocked path ---"
+out=$(fm_fakebin "$blocked/sub")
+rc=$?
+echo "direct rc=$rc out='$out'"
+
+echo "--- simulating the fm-startup-memory-budget.test.sh call site ---"
+fakebin=$(fm_fakebin "$blocked/sub2") || fail "the fake tool directory could not be created"
+echo "unreachable: fakebin=$fakebin"
+
+=== Execution ===
+--- calling fm_fakebin directly against blocked path ---
+mkdir: /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/tmp.3yJNWbrqHb/sub: Permission denied
+not ok - the fake tool directory could not be created
+direct rc=1 out=''
+--- simulating the fm-startup-memory-budget.test.sh call site ---
+mkdir: /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/tmp.3yJNWbrqHb/sub2: Permission denied
+not ok - the fake tool directory could not be created
+not ok - the fake tool directory could not be created
+SCRIPT_EXIT=1

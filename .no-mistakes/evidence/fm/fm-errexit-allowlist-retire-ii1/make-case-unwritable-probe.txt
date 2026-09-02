@@ -1,0 +1,17 @@
+=== Probe script (wake-helpers.sh make_case called with TMP_ROOT chmod 000, i.e. mkdir -p fails) ===
+#!/usr/bin/env bash
+set -u
+cd tests
+TMP_ROOT=$(mktemp -d)
+chmod 000 "$TMP_ROOT"
+. lib.sh
+. wake-helpers.sh
+dir=$(make_case self-held-lock) || fail "the self-held-lock fixture could not be built"
+echo "unreachable: dir=$dir"
+
+=== Execution ===
+mkdir: /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/tmp.GVziyeS69h/self-held-lock: Permission denied
+mkdir: /var/folders/n1/rq5206w56nbgtgvlh68nv3vm0000gp/T/tmp.GVziyeS69h/self-held-lock: Permission denied
+not ok - case fixture self-held-lock: directories could not be created
+not ok - the self-held-lock fixture could not be built
+SCRIPT_EXIT=1
