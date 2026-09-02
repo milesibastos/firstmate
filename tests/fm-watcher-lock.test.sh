@@ -1575,13 +1575,14 @@ test_identity_survives_the_recorded_process_exec() {
 
   printf 'go\n' > "$dir/gate"
   while [ "$waited" -lt 100 ]; do
-    case "$(ps -p "$child" -o command= 2>/dev/null || true)" in *sleep*) break ;; esac
+    case "$(ps -p "$child" -o comm= 2>/dev/null || true)" in sleep) break ;; esac
     waited=$((waited + 1))
     sleep 0.05
   done
-  case "$(ps -p "$child" -o command= 2>/dev/null || true)" in
-    *sleep*) ;;
-    *) kill "$child" 2>/dev/null || true; fail "the fixture never reached its exec, so this case would pass vacuously" ;;
+  case "$(ps -p "$child" -o comm= 2>/dev/null || true)" in
+    sleep) ;;
+    bash) kill "$child" 2>/dev/null || true; fail "the fixture never reached its exec, so this case would pass vacuously" ;;
+    *) kill "$child" 2>/dev/null || true; fail "the fixture's child was in an unexpected state before its exec" ;;
   esac
 
   out=$(identity_verdict_probe "$state" "$recorded" "$child")
