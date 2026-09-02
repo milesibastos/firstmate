@@ -123,12 +123,14 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
   local lock=$1 wait=${FM_TASK_INBOX_LOCK_WAIT_SECS:-$FM_TASK_INBOX_LOCK_WAIT_DEFAULT}
   local deadline probe
   case "$wait" in ''|*[!0-9]*) wait=$FM_TASK_INBOX_LOCK_WAIT_DEFAULT ;; esac
+  # The probe is the structural check: it proves the inbox directory is
+  # writable, so every later create failure is contention and belongs on the
+  # deadline below. A lock found absent after a failed create is contention
+  # too, not a broken directory - the winner's whole critical section can
+  # finish and release inside the loser's own re-check - so it must be retried
+  # rather than reported as failure, which would drop a steer.
   probe=$(mktemp "${lock%/*}/.lock-probe.XXXXXX") || return 1
   rm -f "$probe" || return 1
-  if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
-    fm_lock_try_create "$lock" && return 0
-    [ -e "$lock" ] || [ -L "$lock" ] || return 1
-  fi
   deadline=$(( $(date +%s) + wait ))
   while ! fm_lock_try_acquire "$lock"; do
     [ "$(date +%s)" -lt "$deadline" ] || return 1

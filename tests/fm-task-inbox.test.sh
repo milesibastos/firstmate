@@ -265,6 +265,38 @@ test_concurrent_writers_never_clobber() {
   pass "inbox: concurrent writers serialize on the sequence lock and lose nothing"
 }
 
+test_lost_creation_race_is_retried_not_failed() {
+  local state rec count
+  state="$TMP_ROOT/lost-race/state"; mkdir -p "$state"
+  # The race the concurrent case above can only hit by luck: a writer that loses
+  # the .seq.lock creation race finds the lock absent again the moment the winner
+  # releases it, because the whole critical section is shorter than the loser's
+  # own re-check. Drive exactly that outcome by failing the first create against
+  # a free lock. The enqueue owes the caller a retry on its deadline; reporting
+  # failure here drops a steer the transport already promised to deliver.
+  rec=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    eval "$(declare -f fm_lock_try_create | sed "1s/fm_lock_try_create/_original_fm_lock_try_create/")"
+    lost_race_spent=
+    fm_lock_try_create() {
+      if [ -z "$lost_race_spent" ]; then
+        lost_race_spent=1
+        return 1
+      fi
+      _original_fm_lock_try_create "$@"
+    }
+    fm_task_inbox_write "$2" t1 "steer that lost the creation race"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state") \
+    || fail "a writer that lost the sequence-lock creation race dropped its steer"
+  [ "$rec" = "$state/t1.inbox/001.msg" ] \
+    || fail "the retried write should land the first sequence, got $rec"
+  grep -qF 'steer that lost the creation race' "$rec" \
+    || fail "the retried write did not persist its body"
+  count=$(find "$state/t1.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "the retry should write exactly one record, got $count"
+  pass "inbox: a lost sequence-lock creation race is retried, never a dropped steer"
+}
+
 test_ladder_writes_ignore_vanished_inbox() {
   local state rec
   state="$TMP_ROOT/vanished/state"; mkdir -p "$state"
@@ -502,6 +534,7 @@ test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
+test_lost_creation_race_is_retried_not_failed
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
