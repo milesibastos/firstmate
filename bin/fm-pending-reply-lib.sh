@@ -41,6 +41,7 @@
 #   recovery_attempted_epoch=
 #   recovery_sender_pid=
 #   recovery_sender_identity=
+#                           fm_pid_identity output (bin/fm-wake-lib.sh owns it)
 #   recovery_sent_epoch=
 #   recovery_delivery_outcome=
 #   recovery_turn_seen_busy=

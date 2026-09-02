@@ -360,8 +360,9 @@ worker_stop_recorded_execution() { # <job-dir>
 # fm_identity_holder_is_current). This is not an oversight, and consolidating it
 # was tried and declined - please do not "fix" it.
 #
-# The fleet-wide owner is the right one to reach for in general, and three other
-# hand-rolled identity proofs were retired onto it. This site is different: it
+# The fleet-wide owner is the right one to reach for in general, and the
+# hand-rolled identity proofs in bin/fm-teardown.sh and
+# bin/fm-pending-reply-lib.sh were retired onto it. This site is different: it
 # does not re-derive an identity, it consumes the primitive this subsystem
 # already owns at a dozen other call sites, several of which record into DURABLE
 # files (.claim/supervisor_start, .claim/group_start, .owner-start, and the

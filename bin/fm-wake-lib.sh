@@ -444,8 +444,8 @@ fm_identity_start_component() {
 #
 # This is the one owner of "is this still the same process". Every caller that
 # holds a recorded identity - a lock, a durable record, or an in-memory scan
-# result - compares through here rather than re-deriving the rule, because each
-# re-derivation of it has landed a different, weaker proof.
+# result - must compare through here rather than re-deriving the rule, because
+# each re-derivation of it has landed a different, weaker proof.
 #
 # IDENTITY ONLY. This answers "is this the same process", never "has it made
 # progress recently": it reads no mtime, no heartbeat, and no age. A correct
