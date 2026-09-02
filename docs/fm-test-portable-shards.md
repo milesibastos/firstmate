@@ -136,11 +136,16 @@ It is also not tuned to look good: on the four-shard layout this change replaced
 
 When it fires, refresh the hints before raising the count, since a shard is only honestly over the threshold once its packing is current; raise `PORTABLE_SERIAL_SHARDS` if the slowest shard is still over 12 minutes afterwards.
 
-Refresh the hints by downloading the per-shard timing artifacts from a green CI run, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs, and updating the table above:
+Source replacement hints by the same rule as the current ones (see the hint provenance above): the per-script maximum across that many consecutive green `main` CI runs, never a single run's values.
+A single run's lucky runner under-weights whatever it happened to run fast, the shard built from that hint packs too full, and an overfull shard is what crosses the cap — the same seven-shard run above spread 6.0 to 10.3 minutes on identical packing, so one run's numbers are noise, not the signal a refresh needs.
+This is an interim manual step, not the durable fix; a guard that mechanically detects a shard drifting toward its own timeout is separate follow-up work, filed and out of scope here.
+Download each run's artifacts into its own directory, reduce per script by maximum across them, and replace the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the result:
 
 ```sh
-gh run download <run-id> -R milesibastos/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
-jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*/*.json | LC_ALL=C sort
+for run in <run-id-1> <run-id-2> ... <run-id-N>; do
+  gh run download "$run" -R milesibastos/firstmate --pattern 'fm-test-timing-portable-serial-*' -D "/tmp/fm-serial-$run"
+done
+jq -rs '[.[].scripts[]] | group_by(.path) | map([.[0].path, (map(.duration_ms) | max)] | @tsv) | .[]' /tmp/fm-serial-*/*/*.json | LC_ALL=C sort
 bin/fm-test-run.sh --check-coverage
 ```
 
