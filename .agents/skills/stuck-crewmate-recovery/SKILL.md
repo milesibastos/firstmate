@@ -39,6 +39,19 @@ Preserve its uncommitted changes and commits, keep the same task identity, and r
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
+## When the terminal that hosted the work is gone, not just the agent
+
+A dead agent leaves its endpoint behind; a dead terminal session takes the endpoint with it, and usually every task's at once.
+The signature is that no lifecycle verb has anything to act on: stopping the agent reports there is none, and a relaunch reports the endpoint cannot be launched into.
+
+Rebuild the endpoint first with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> reconcile`, then relaunch as usual.
+It restores the endpoint from the task's own record and launches nothing, so the ordinary relaunch above still decides whether an agent may start ([`docs/agent-control.md`](../../../docs/agent-control.md) owns what it proves first).
+Every uncommitted change and commit is preserved, because nothing about the local copy is touched.
+
+Its refusals are findings, not obstacles.
+A refusal naming the task's endpoint living under a different name means the work is not lost at all and that endpoint is the one to address.
+A refusal naming a process still holding the local copy, or a runtime it cannot read, means the recovery is not yet safe; report the task blocked with that evidence rather than working around it.
+
 ## Live-endpoint escalation
 
 Escalate in order:
