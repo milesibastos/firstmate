@@ -601,6 +601,56 @@ mark_escalated_seen() {  # <state> <captured-endpoint-file>
   return "$rc"
 }
 
+# --- away-entry seed --------------------------------------------------------
+# The captain learns a task's status one of two ways: attended firstmate drains
+# and tells them, advancing the fleet-wide presentation cursor, or this daemon
+# escalates a digest, advancing its own per-task marker. Those are two records
+# of ONE audience, and each only moves while its own side is supervising. So
+# this daemon's marker goes stale across every stretch firstmate supervised
+# while the daemon was stopped, and rescanning from it at away-mode entry
+# re-reports work the captain was already told about - a `done:` from hours
+# earlier arriving as news.
+#
+# Seeding the marker from the presentation cursor at entry closes that gap
+# without making the cursor authoritative afterwards. Consulting it continuously
+# would be wrong: once away mode begins the only drains that run are this
+# daemon's own, which present to nobody, so the cursor stops being evidence of
+# anything the captain saw. It is read committed-only for the same reason - the
+# pre-manifest migration seed is the OPEN DECISIONS fold's own bookmark, not a
+# presentation.
+#
+# The seed runs once per away session, keyed to the identity of state/.afk, so a
+# daemon restart inside one session cannot re-seed. Since a daemon's own drain
+# no longer advances the cursor, a re-seed would now be harmless anyway; the
+# guard keeps that from being load-bearing.
+_afk_epoch_ident() {  # <state>
+  local flag=$1/$AFK_FLAG_NAME
+  [ -f "$flag" ] && [ -r "$flag" ] && [ ! -L "$flag" ] || return 1
+  _fm_open_decisions_file_ident "$flag"
+}
+
+seed_seen_from_attended_presentation() {  # <state>
+  local state=$1 epoch marker recorded f task private shared ident
+  afk_active "$state" || return 0
+  epoch=$(_afk_epoch_ident "$state") || return 0
+  [ -n "$epoch" ] || return 0
+  marker="$state/.subsuper-seed-epoch"
+  recorded=$(cat "$marker" 2>/dev/null || true)
+  [ "$recorded" != "$epoch" ] || return 0
+  for f in "$state"/*.status; do
+    [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
+    task=$(basename "$f"); task=${task%.status}
+    private=$(status_seen_offset "$state" "$task")
+    shared=$(status_presentation_cursor_offset "$f" committed-only 2>/dev/null) || shared=0
+    case "$shared" in ''|*[!0-9]*) shared=0 ;; esac
+    case "$private" in ''|*[!0-9]*) private=0 ;; esac
+    [ "$shared" -gt "$private" ] || continue
+    ident=$(_fm_open_decisions_file_ident "$f") || continue
+    mark_status_seen "$state" "$task" "$shared" "$ident" || true
+  done
+  printf '%s' "$epoch" > "$marker"
+}
+
 # Busy and composer-empty detection form the injection boundary.
 # These thin wrappers keep the daemon's call sites and unit tests stable.
 #
@@ -1605,6 +1655,7 @@ fm_super_main() {
   afk_active "$STATE" && afk_status="on"
   log "daemon starting (pid $$); target=$TARGET; target_source=$target_source; backend=$BACKEND; backend_source=$backend_source; afk=$afk_status; inject_skip='${FM_INJECT_SKIP:-$INJECT_SKIP_DEFAULT}'; stale_escalate=${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}s; batch=${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}s"
   migrate_watcher_pause_markers "$STATE"
+  seed_seen_from_attended_presentation "$STATE"
 
   # --- shutdown: flush buffered escalations, reap child, release lock -------
   local WATCHER_PID="" CUR_TMP=""

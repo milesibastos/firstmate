@@ -570,6 +570,98 @@ test_catchall_scan_surfaces_a_masked_event() {
   pass "the away-mode catch-all scan surfaces a masked event once"
 }
 
+test_away_entry_seed_skips_what_attended_supervision_presented() {
+  local dir state buffer head presented later tail snapshot a_cursor b_cursor
+  dir=$(make_supercase away-entry-seed)
+  state="$dir/state"
+  buffer="$state/.subsuper-escalations"
+
+  # Both logs end byte-identical, with a done: at line 4 buried under later
+  # working: appends. The only difference is where ATTENDED firstmate's
+  # presentation cursor sits when away mode begins: past the done: for a1
+  # (firstmate handled it while this daemon was stopped) and behind it for b1.
+  head='working: setup
+working: scaffolding
+working: first pass
+'
+  presented='done: lock acquire path now proves holder identity
+working: second decision cycle
+working: third decision cycle
+working: rebasing
+working: validation started
+'
+  later='working: validation running
+working: fixing review findings
+working: validation running again
+'
+  tail="$presented$later"
+  printf '%s%s' "$head" "$presented" > "$state/seed-a1.status"
+  printf '%s' "$head" > "$state/seed-b1.status"
+  snapshot=$(status_presentation_snapshot "$state") \
+    || fail "could not snapshot the status logs"
+  status_commit_presentation_snapshot "$state" "$snapshot" \
+    || fail "could not publish the attended presentation cursor"
+  a_cursor=$(log_size "$state/seed-a1.status")
+  b_cursor=$(log_size "$state/seed-b1.status")
+  printf '%s' "$later" >> "$state/seed-a1.status"
+  printf '%s' "$tail" >> "$state/seed-b1.status"
+  [ "$a_cursor" -gt "$b_cursor" ] \
+    || fail "the two cursors must disagree for this case to test anything"
+
+  # Away mode begins. Before the seed the daemon has no position of its own, so
+  # both logs would be rescanned from byte 0.
+  [ "$(status_seen_offset "$state" seed-a1)" = 0 ] \
+    || fail "the daemon should start this session with no position of its own"
+  : > "$state/.afk"
+  seed_seen_from_attended_presentation "$state"
+
+  [ "$(status_seen_offset "$state" seed-a1)" = "$a_cursor" ] \
+    || fail "away-mode entry did not adopt what attended supervision had presented"
+  [ "$(status_seen_offset "$state" seed-b1)" = "$b_cursor" ] \
+    || fail "away-mode entry did not adopt the attended position for seed-b1"
+
+  rm -f "$state/.subsuper-last-scan"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  grep -F "seed-b1.status: done: lock acquire path" "$buffer" >/dev/null 2>&1 \
+    || fail "the catch-all did not surface a done: attended supervision never presented"
+  ! grep -F "seed-a1.status" "$buffer" >/dev/null 2>&1 \
+    || fail "away-mode entry replayed a done: attended supervision had already presented"
+  pass "away-mode entry seeds from what attended supervision presented, without replaying it"
+}
+
+test_away_entry_seed_runs_once_per_session() {
+  local dir state before after snapshot
+  dir=$(make_supercase away-entry-seed-once)
+  state="$dir/state"
+  printf 'working: setup
+done: first milestone
+' > "$state/once-a1.status"
+  snapshot=$(status_presentation_snapshot "$state") || fail "could not snapshot"
+  status_commit_presentation_snapshot "$state" "$snapshot" || fail "could not publish"
+  : > "$state/.afk"
+  seed_seen_from_attended_presentation "$state"
+  before=$(status_seen_offset "$state" once-a1)
+  [ "$before" -gt 0 ] || fail "the first seed did not adopt the attended position"
+
+  # Cursor movement AFTER away mode began is not attended supervision, so a
+  # daemon restart inside the same session must not adopt it.
+  printf 'done: second milestone nobody presented
+' >> "$state/once-a1.status"
+  snapshot=$(status_presentation_snapshot "$state") || fail "could not re-snapshot"
+  status_commit_presentation_snapshot "$state" "$snapshot" || fail "could not re-publish"
+  seed_seen_from_attended_presentation "$state"
+  after=$(status_seen_offset "$state" once-a1)
+  [ "$after" = "$before" ] \
+    || fail "a restart inside one away session re-seeded from unattended cursor movement"
+
+  # A genuinely new away session (a new flag identity) seeds again.
+  rm -f "$state/.afk"; : > "$state/.afk"
+  seed_seen_from_attended_presentation "$state"
+  [ "$(status_seen_offset "$state" once-a1)" -gt "$before" ] \
+    || fail "a new away session did not seed from the current attended position"
+  pass "the away-entry seed runs once per session, not once per daemon start"
+}
+
 test_classify_routine_signal_self() {
   local dir state out
   dir=$(make_supercase classify-routine)
@@ -2690,6 +2782,8 @@ test_transient_unreadable_signal_recovers_without_advancing
 test_permission_recovery_reclassifies_catchall_status
 test_permanent_classification_failure_is_reported_and_acknowledged
 test_catchall_scan_surfaces_a_masked_event
+test_away_entry_seed_skips_what_attended_supervision_presented
+test_away_entry_seed_runs_once_per_session
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale
