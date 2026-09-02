@@ -135,10 +135,10 @@ jobs:
     # across this matrix that projects to ~9.3 min per shard, plus ~15 s setup.
     # The shard COUNT, not this number, is the lever that holds that margin as
     # the lane grows: raise the count when a shard's measured script time passes
-    # 12 min. That trigger sits above the 6.0-10.3 min spread a healthy run
-    # shows on identical packing, so it reports growth rather than a slow
-    # runner. bin/fm-test-run.sh owns the count and refuses a matrix that
-    # disagrees; docs/fm-test-portable-shards.md owns the measurement.
+    # 12 min. That trigger is sized above observed runner-speed variance, not
+    # at the projection, so it reports growth rather than a slow runner.
+    # bin/fm-test-run.sh owns the count and refuses a matrix that disagrees;
+    # docs/fm-test-portable-shards.md owns the measured spread and margin.
     timeout-minutes: 20
     strategy:
       # Every shard reports so one failure never hides another shard's result.

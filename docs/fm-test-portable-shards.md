@@ -94,7 +94,7 @@ The extra runners are close to free, since a shard's job setup costs about 15 se
 
 The projection is 556 s (~9.3 min) for every shard, since the packing balances hint sums to within a second.
 The measured column is the first green seven-shard run, [33585388230](https://github.com/milesibastos/firstmate/actions/runs/33585388230), which is the run that introduced this layout.
-A second green run of the same packing spread 6.8 to 11.4 minutes, so treat this column as one sample of a variable quantity rather than as the layout's settled cost.
+A second green run of the same packing, [33597891337](https://github.com/milesibastos/firstmate/actions/runs/33597891337), spread 6.8 to 11.4 minutes, so treat this column as one sample of a variable quantity rather than as the layout's settled cost.
 
 | Lane | Script count | Projected | First measured |
 |---|---:|---:|---:|
@@ -133,7 +133,7 @@ A signal that cries wolf under load is worse than none, because load is the only
 
 Twelve leaves the trigger useful in both directions: it clears the healthy runs measured so far, yet still fires well below the 20-minute cap, leaving room to act rather than to discover.
 Its margin over noise is thin and worth stating honestly.
-The slowest healthy shard has measured 10.3 minutes on run [33585388230](https://github.com/milesibastos/firstmate/actions/runs/33585388230) and 11.4 minutes on the next, so the gap between a healthy run and the trigger is about 0.6 minutes on two samples, not the 1.7 a single sample suggested.
+The slowest healthy shard has measured 10.3 minutes on run [33585388230](https://github.com/milesibastos/firstmate/actions/runs/33585388230) and 11.4 minutes on run [33597891337](https://github.com/milesibastos/firstmate/actions/runs/33597891337), so the gap between a healthy run and the trigger is about 0.6 minutes on two samples, not the 1.7 a single sample suggested.
 Two samples of a variable quantity do not bound it, and that is the reason the threshold is deliberately not being re-tuned here: it has not fired, lane growth is absorbed by the shard count rather than by this number, and a guard that measures drift instead of comparing against a hand-set figure is filed as the intended replacement.
 Treat 12 as an interim threshold with a known-thin margin, not a durable one.
 It is also not tuned to look good: on the four-shard layout this change replaced, 15 of 16 measured shard-runs were at or above 12 minutes, so the same trigger would have caught the original failure long before it timed out.
