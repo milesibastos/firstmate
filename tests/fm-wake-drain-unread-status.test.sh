@@ -211,6 +211,53 @@ test_snapshot_does_not_ack_a_later_append() {
   pass "presentation cursor advances only through its captured endpoint"
 }
 
+test_unprinted_terminal_line_blocks_the_presentation_cursor() {
+  local dir state out status remaining event
+  dir=$(make_case terminal-blocks-cursor)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-block.status"
+  prime_cursor "$state" "$status"
+
+  # The reported loss shape: an unread note: immediately followed by an unread
+  # done:, with no signal record presenting this task in full. Only the note: is
+  # printed on this path, so advancing the cursor through the done: would publish
+  # a cursor asserting a presentation that never happened.
+  printf 'note: captain answer worth printing\n' >> "$status"
+  printf 'done: lock acquire path now proves holder identity\n' >> "$status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on the note-then-done shape"
+
+  grep -F 'task-block note: captain answer worth printing' "$out" >/dev/null \
+    || fail "the unread note was not surfaced: $(cat "$out")"
+  if grep -F 'done: lock acquire path now proves holder identity' "$out" >/dev/null; then
+    fail "the drain printed a terminal line this path does not surface: $(cat "$out")"
+  fi
+
+  # The done: must stay classifiable from the published cursor, because a
+  # supervisor that floors its scan position there is the consumer that would
+  # otherwise never read it again.
+  remaining=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_new_lines_since_cursor "$2/task-block.status"
+  ' _ "$ROOT" "$state") || fail "could not read the unread span after the drain"
+  case "$remaining" in
+    *'done: lock acquire path now proves holder identity'*) ;;
+    *) fail "the cursor advanced past a done: nothing presented: $remaining" ;;
+  esac
+
+  event=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_span_first_actionable "$2/task-block.status" \
+      "$(status_presentation_cursor_offset "$2/task-block.status")"
+  ' _ "$ROOT" "$state") \
+    || fail "no actionable event remained ahead of the published cursor"
+  [ "$event" = 'done: lock acquire path now proves holder identity' ] \
+    || fail "a supervisor flooring at the published cursor would not classify the done: $event"
+
+  pass "a captain-relevant line the drain never printed blocks the presentation cursor"
+}
+
 test_retired_task_id_starts_new_status_unread() {
   local dir state out offset event old_ident
   dir=$(make_case retired-task-reuse)
@@ -371,6 +418,7 @@ test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
+test_unprinted_terminal_line_blocks_the_presentation_cursor
 test_retired_task_id_starts_new_status_unread
 test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible

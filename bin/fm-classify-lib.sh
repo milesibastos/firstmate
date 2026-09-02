@@ -1096,7 +1096,7 @@ EOF
 }
 
 status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
-  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe
+  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe blocked
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     safe=false
@@ -1112,16 +1112,35 @@ $fully_presented
       # lines remain unacknowledged only while they are the sole unread content,
       # preserving delayed signal annotations without replaying a handled note
       # that happened to follow a routine line.
+      # A TERMINAL captain-relevant line this drain never printed blocks that
+      # advance outright, because advancing through it would publish a cursor
+      # asserting a presentation that never happened, and a consumer that floors
+      # a scan position on this cursor would then never classify it at all.
+      # Holding the cursor re-presents this span's surface lines on a later drain
+      # instead: a duplicate rather than a lost event, and it clears as soon as a
+      # signal annotation presents that task in full through fully_presented.
+      # `needs-decision` and `blocked` are deliberately exempt. They are not
+      # printed here either, but OPEN DECISIONS is a standing surface that
+      # re-prints them on every drain until the fold proves them closed, so the
+      # cursor passing them loses nothing. A terminal event has no such standing
+      # surface: its one-shot presentation is the only one it ever gets.
+      blocked=false
       while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
           *[![:space:]]*)
-            if status_line_is_unread_surface "$line"; then safe=true; break; fi
+            if status_line_is_unread_surface "$line"; then safe=true; continue; fi
+            status_is_captain_relevant "$line" || continue
+            case "$(status_line_verb "$line")" in
+              needs-decision|blocked) continue ;;
+            esac
+            blocked=true
+            break
             ;;
         esac
       done <<EOF
 $lines
 EOF
-      if [ "$safe" = false ]; then endpoint=$offset; fi
+      if [ "$safe" = false ] || [ "$blocked" = true ]; then endpoint=$offset; fi
     fi
     printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" || return 1
   done <<EOF
