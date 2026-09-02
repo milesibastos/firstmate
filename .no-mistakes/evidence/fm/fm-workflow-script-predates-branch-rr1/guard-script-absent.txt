@@ -1,0 +1,5 @@
+::error::bin/fm-pr-attestation-settle.sh is absent from the checked-out tree, so this step cannot run.
+This workflow's definition comes from head merged into base, but its files come from whatever ref the checkout step selects; those must be the same tree.
+If the checkout above pins a ref:, remove it so the default merge ref is used.
+If it does not, this branch predates the commit that added bin/fm-pr-attestation-settle.sh - rebase it onto main.
+EXIT:1
