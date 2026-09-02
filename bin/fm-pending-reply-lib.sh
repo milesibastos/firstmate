@@ -90,6 +90,19 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 # shellcheck source=bin/fm-classify-lib.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-classify-lib.sh"
 
+# fm-wake-lib.sh is loaded on demand, not at source time: sourcing it creates
+# its state directory, and this library promises no side effects on source.
+# STATE is localized for the same reason the queue helpers below localize it -
+# the load must not rebind this process's own state root - and is pointed at a
+# directory that already exists so the load creates nothing new.
+_fm_pending_reply_require_wake_lib() {  # <existing-dir>
+  command -v fm_identity_holder_is_current >/dev/null 2>&1 && return 0
+  local STATE=$1 FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  [ -d "$STATE" ] || return 1
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+}
+
 FM_PENDING_REPLY_SCHEMA='fm-pending-reply.v1'
 FM_PENDING_REPLY_CORR_RE='corr=[A-Fa-f0-9]{16}'
 FM_PENDING_REPLY_GRACE_DEFAULT=120
@@ -891,7 +904,9 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   msg=$(fm_pending_reply_recovery_message "$rec")
   sender_pid=${BASHPID:-$$}
-  sender_identity=$(fm_pending_reply_pid_identity "$sender_pid") || return 1
+  _fm_pending_reply_require_wake_lib "$state" || return 1
+  sender_identity=$(fm_pid_identity "$sender_pid") || return 1
+  [ -n "$sender_identity" ] || return 1
   fm_pending_reply_set "$rec" recovery_sender_pid "$sender_pid" || return 1
   fm_pending_reply_set "$rec" recovery_sender_identity "$sender_identity" || return 1
   fm_pending_reply_set "$rec" recovery_attempted_epoch "$now" || return 1
@@ -918,21 +933,27 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   return 1
 }
 
-fm_pending_reply_pid_identity() {  # <pid>
-  local pid=$1 identity
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  identity=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
-  [ -n "$identity" ] || return 1
-  printf '%s' "$identity"
-}
-
+# Whether the process that was mid-recovery for this record still exists.
+#
+# NOT DISPROVED IS ENOUGH, and that is the whole ruling. The caller's next step
+# is to reconcile the request away from this sender, so answering "gone" without
+# proof steals a live sender's work in flight: an identity that cannot be
+# recomputed, or one recorded in a form this build no longer emits, keeps the
+# record with its sender. Only an actually reused pid or an absent process ends
+# it. That is the shared predicate's own permissive return code
+# (fm_identity_holder_is_current in bin/fm-wake-lib.sh), used as it stands
+# rather than re-derived here.
+#
+# A record with no identity at all is still refused: an identityless record is a
+# malformed one, not an older build's, because this field has been mandatory for
+# as long as the recovery phase has existed.
 fm_pending_reply_sender_alive() {  # <record-path>
-  local rec=$1 pid expected actual
+  local rec=$1 pid expected
   pid=$(fm_pending_reply_get "$rec" recovery_sender_pid)
   expected=$(fm_pending_reply_get "$rec" recovery_sender_identity)
   [ -n "$expected" ] || return 1
-  actual=$(fm_pending_reply_pid_identity "$pid") || return 1
-  [ "$actual" = "$expected" ]
+  _fm_pending_reply_require_wake_lib "$(dirname "$rec")" || return 1
+  fm_identity_holder_is_current "$expected" "$pid"
 }
 
 fm_pending_reply_finish_recovery() {  # <state-dir> <corr_id> <confirmed|failed>
