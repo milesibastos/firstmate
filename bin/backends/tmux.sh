@@ -448,7 +448,9 @@ fm_backend_tmux_endpoint_rebuild() {  # <target> <cwd> -> prints window id
   if ! tmux has-session -t "=$session" 2>/dev/null; then
     tmux new-session -d -s "$session" || return 1
   fi
-  if tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null | grep -qx "$window"; then
+  # -F for the same reason fm_backend_tmux_agent_state uses it: a task id may
+  # contain '.', which grep would otherwise read as a pattern.
+  if tmux list-windows -t "=$session" -F '#{window_name}' 2>/dev/null | grep -Fqx "$window"; then
     return 1
   fi
   wid=$(tmux new-window -dP -F '#{window_id}' -t "=$session:" -n "$window" -c "$cwd") || return 1

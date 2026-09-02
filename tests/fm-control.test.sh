@@ -1150,6 +1150,39 @@ SH
   pass "fm-control reconcile: a worktree a live process still holds refuses, and an unreadable check never reads as free"
 }
 
+# make_path_without_lsof: a curated PATH carrying the tools the control plane
+# needs and no lsof, mirroring tests/fm-teardown.test.sh's helper of the same
+# name. The fake session provider is prepended by the caller.
+make_path_without_lsof() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
+test_reconcile_discloses_an_unavailable_holder_check() {
+  local dir out rc path_dir
+  dir=$(new_case reconcile-nolsof)
+  add_task "$dir" t1 claude
+  endpoint_gone "$dir"
+  path_dir=$(make_path_without_lsof "$dir")
+  # A missing holder-check tool must not recreate the dead end this verb exists
+  # to open: the endpoint proofs are the load-bearing ones, so the rebuild
+  # proceeds and says exactly what went unchecked.
+  out=$(env PATH="$dir/fakebin:$path_dir" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_RECONCILE_WAIT=0.05 \
+    "$CONTROL" t1 reconcile 2>&1); rc=$?
+  expect_code 0 "$rc" "a reconcile with no holder check available should still rebuild"$'\n'"$out"
+  assert_contains "$out" "reconciled t1" "the endpoint should be rebuilt"
+  assert_contains "$out" "worktree-holders=unchecked" \
+    "the outcome should disclose that the holder check could not run"
+  pass "fm-control reconcile: an unavailable holder check is disclosed, never silently reported as proof"
+}
+
 test_reconcile_refuses_a_backend_it_cannot_reconstruct() {
   local dir out rc
   dir=$(new_case reconcile-herdr)
@@ -1226,3 +1259,4 @@ test_reconcile_refuses_a_backend_it_cannot_reconstruct
 test_missing_endpoint_refusals_name_the_way_out
 test_endpoint_rebuildable_backends_are_exactly_tmux
 test_reconcile_refuses_a_worktree_something_still_holds
+test_reconcile_discloses_an_unavailable_holder_check

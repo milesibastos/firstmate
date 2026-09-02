@@ -895,6 +895,12 @@ do_relaunch() {
 # After rebuilding it confirms the endpoint exists, classifies agent-free, and
 # settled in the recorded worktree; if it did not, it removes the endpoint it
 # just created rather than leaving a broken one behind.
+#
+# A rebuilt endpoint is launch-equivalent to one an `exit` left behind: both are
+# a shell sitting in the recorded worktree, and bin/fm-spawn.sh re-sends every
+# environment export its launch depends on. The only pane setup a relaunch skips
+# is `treehouse get`, which must be skipped, because the worktree already exists
+# and the pane is already in it - which is exactly what this verb establishes.
 
 # reconcile_worktree_holder_report: the recovery path's second, independent read
 # on "is anything still running for this task" - a live process holding the
