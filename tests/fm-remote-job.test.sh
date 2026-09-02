@@ -579,12 +579,10 @@ for _ in $(seq 1 100); do
 done
 assert_present "$STATE_ROOT/worker.lock/quarantine" "failed shutdown released worker ownership"
 fm_remote_job_probe "$ACCOUNT_HOME" && fail "quarantined worker ownership still reported ready"
-set +e
 HOME="$ACCOUNT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
   >> "$TMP_ROOT/worker.out" 2>> "$TMP_ROOT/worker.err"
 REPLACEMENT_RC=$?
-set -e
 [ "$REPLACEMENT_RC" -ne 0 ] || fail "a replacement worker ignored quarantined ownership"
 assert_present "$STATE_ROOT/worker.lock/quarantine" "a replacement removed quarantined ownership"
 kill -KILL -- "-$GROUP_PID" 2>/dev/null || true
@@ -596,9 +594,11 @@ RECOVERY_HOME="$TMP_ROOT/recovery-account"
 RECOVERY_STATE="$TMP_ROOT/recovery-jobs"
 RECOVERY_JOB="$RECOVERY_STATE/jobs/job-quarantine"
 mkdir -p "$RECOVERY_HOME" "$RECOVERY_STATE/jobs" "$RECOVERY_STATE/logs" \
-  "$RECOVERY_STATE/worker.lock" "$RECOVERY_JOB/.claim"
+  "$RECOVERY_STATE/worker.lock" "$RECOVERY_JOB/.claim" \
+  || fail "setup: could not build the quarantine recovery fixture"
 chmod 700 "$RECOVERY_HOME" "$RECOVERY_STATE" "$RECOVERY_STATE/jobs" "$RECOVERY_STATE/logs" \
-  "$RECOVERY_STATE/worker.lock" "$RECOVERY_JOB" "$RECOVERY_JOB/.claim"
+  "$RECOVERY_STATE/worker.lock" "$RECOVERY_JOB" "$RECOVERY_JOB/.claim" \
+  || fail "setup: could not confine the quarantine recovery fixture"
 sleep 20 &
 QUARANTINED_PROCESS_PID=$!
 sleep 0.01 &
@@ -614,21 +614,22 @@ printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/supervisor"
 : > "$RECOVERY_JOB/stdout"
 : > "$RECOVERY_JOB/stderr"
 chmod 600 "$RECOVERY_STATE/worker.lock"/* "$RECOVERY_JOB/state" "$RECOVERY_JOB/.claim"/* \
-  "$RECOVERY_JOB/stdout" "$RECOVERY_JOB/stderr"
-touch -t 200001010000 "$RECOVERY_STATE/worker.lock"
-set +e
+  "$RECOVERY_JOB/stdout" "$RECOVERY_JOB/stderr" \
+  || fail "setup: could not confine the quarantined ownership and claim records"
+touch -t 200001010000 "$RECOVERY_STATE/worker.lock" \
+  || fail "setup: could not age the quarantined ownership lock"
 HOME="$RECOVERY_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$RECOVERY_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
   > "$TMP_ROOT/recovery-refused.out" 2> "$TMP_ROOT/recovery-refused.err"
 RECOVERY_REFUSED_RC=$?
-set -e
 [ "$RECOVERY_REFUSED_RC" -ne 0 ] || fail "quarantine recovery ignored a recorded live process"
 assert_present "$RECOVERY_STATE/worker.lock/quarantine" "a live recorded process lost quarantine protection"
 printf '%s\n' "$QUARANTINED_PROCESS_PID" > "$RECOVERY_JOB/.claim/owner"
 printf 'stale owner identity\n' > "$RECOVERY_JOB/.claim/owner_start"
 printf 'stale supervisor identity\n' > "$RECOVERY_JOB/.claim/supervisor_start"
 chmod 600 "$RECOVERY_JOB/.claim/owner" "$RECOVERY_JOB/.claim/owner_start" \
-  "$RECOVERY_JOB/.claim/supervisor_start"
+  "$RECOVERY_JOB/.claim/supervisor_start" \
+  || fail "setup: could not confine the reused-pid claim records"
 HOME="$RECOVERY_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$RECOVERY_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" \
   > "$TMP_ROOT/recovery-worker.out" 2> "$TMP_ROOT/recovery-worker.err" &
@@ -641,7 +642,7 @@ assert_present "$RECOVERY_STATE/worker.ready" "a reused supervisor pid did not p
 assert_absent "$RECOVERY_STATE/worker.lock/quarantine" "recovered worker retained stale quarantine"
 kill -0 "$QUARANTINED_PROCESS_PID" 2>/dev/null \
   || fail "worker recovery signalled a process whose supervisor identity did not match"
-kill -TERM "$RECOVERY_WORKER_PID"
+kill -TERM "$RECOVERY_WORKER_PID" || fail "the recovered worker was gone before it could be stopped"
 wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
 RECOVERY_WORKER_PID=
 kill "$QUARANTINED_PROCESS_PID" 2>/dev/null || true
@@ -668,8 +669,8 @@ pass "quarantine recovery refuses unverifiable supervisors and ignores reused pi
 # left behind every run.
 REPEAT_HOME="$TMP_ROOT/repeat-signal-account"
 REPEAT_STATE="$TMP_ROOT/repeat-signal-jobs"
-mkdir -p "$REPEAT_HOME"
-chmod 700 "$REPEAT_HOME"
+mkdir -p "$REPEAT_HOME" || fail "setup: could not build the repeated-signal account home"
+chmod 700 "$REPEAT_HOME" || fail "setup: could not confine the repeated-signal account home"
 HOME="$REPEAT_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$REPEAT_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
   > "$TMP_ROOT/repeat-signal.out" 2> "$TMP_ROOT/repeat-signal.err" &
@@ -711,7 +712,8 @@ for _ in $(seq 1 600); do
 done
 assert_present "$REPEAT_STATE/worker.ready" \
   "the worker after a repeatedly signalled shutdown never reported ready"
-kill -TERM "$REPEAT_WORKER_PID"
+kill -TERM "$REPEAT_WORKER_PID" \
+  || fail "the worker after a repeatedly signalled shutdown was gone before it could be stopped"
 wait "$REPEAT_WORKER_PID" 2>/dev/null || true
 REPEAT_WORKER_PID=
 pass "a repeatedly signalled shutdown still releases ownership for the next worker"
@@ -725,9 +727,11 @@ RESTART_ROOT="$TMP_ROOT/restart-root"
 RESTART_HOME="$TMP_ROOT/restart-account"
 RESTART_STATE="$TMP_ROOT/restart-state"
 RESTART_CHILD_LOG="$TMP_ROOT/restart-children"
-mkdir -p "$RESTART_ROOT/bin" "$RESTART_HOME"
-cp "$ROOT/bin/fm-remote-job-lib.sh" "$RESTART_ROOT/bin/"
-cp "$ROOT/bin/fm-remote-job-worker.sh" "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh"
+mkdir -p "$RESTART_ROOT/bin" "$RESTART_HOME" || fail "setup: could not build the restart-guard root"
+cp "$ROOT/bin/fm-remote-job-lib.sh" "$RESTART_ROOT/bin/" \
+  || fail "setup: could not stage the job library under the restart-guard root"
+cp "$ROOT/bin/fm-remote-job-worker.sh" "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh" \
+  || fail "setup: could not stage the supervisor under test"
 printf 'fixture\n' > "$RESTART_ROOT/AGENTS.md"
 cat > "$RESTART_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
 #!/bin/bash
@@ -737,7 +741,7 @@ printf '%s\n' "${BASHPID:-$$}" >> "$FM_TEST_SUPERVISOR_CHILD_LOG"
 sleep "$FM_TEST_SUPERVISOR_CHILD_SECONDS"
 exit "$FM_TEST_SUPERVISOR_CHILD_STATUS"
 SH
-chmod +x "$RESTART_ROOT/bin"/*.sh
+chmod +x "$RESTART_ROOT/bin"/*.sh || fail "setup: could not make the restart-guard fixtures executable"
 HOME="$RESTART_HOME" FM_ROOT_OVERRIDE="$RESTART_ROOT" \
   FM_REMOTE_JOB_STATE_ROOT="$RESTART_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=1 FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=3 \
@@ -753,10 +757,8 @@ done
 if kill -0 "$RESTART_SUPERVISOR_PID" 2>/dev/null; then
   fail "workers dying just past the healthy threshold drove an unbounded restart loop"
 fi
-set +e
 wait "$RESTART_SUPERVISOR_PID"
 RESTART_SUPERVISOR_RC=$?
-set -e
 RESTART_SUPERVISOR_PID=
 [ "$RESTART_SUPERVISOR_RC" -ne 0 ] || fail "the exhausted restart guard reported success"
 [ "$(wc -l < "$RESTART_CHILD_LOG" | tr -d ' ')" -eq 3 ] \
