@@ -357,7 +357,15 @@ print_status_sections() {
   print_unread_status_section "$snapshot" || return 1
   print_open_decisions_section "$snapshot" || return 1
   print_record_divergence_section || return 1
-  status_commit_presentation_snapshot "$STATE" "$acknowledged"
+  # While away mode is active this section's stdout is captured and discarded
+  # by the sub-supervisor daemon's own catch-up drain (bin/fm-supervise-daemon.sh
+  # parses only tab-separated wake rows from it), never shown to the captain.
+  # Committing the cursor there would assert a presentation that never
+  # happened and float the daemon's own scan floor (status_seen_offset) past
+  # bytes it has not classified yet. Skipping the commit while state/.afk
+  # exists leaves the cursor at the captain's last real presentation, so a
+  # daemon-only drain degrades toward a duplicate on return, never a loss.
+  [ -e "$STATE/.afk" ] || status_commit_presentation_snapshot "$STATE" "$acknowledged"
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]

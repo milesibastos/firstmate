@@ -580,10 +580,16 @@ _seen_status_path() {  # <state> <task>
 # An absent, malformed, identity-mismatched, or legacy private marker reads 0,
 # and an unreadable or corrupt shared cursor contributes nothing, so uncertainty
 # still prefers a duplicate over event loss.
+# The shared read is committed-only: a fleet manifest row is another actor's
+# proof of a real presentation, but the pre-manifest migration seed
+# (bin/fm-classify-lib.sh's status_open_decisions_cursor_offset) is the OPEN
+# DECISIONS fold's own scan bookmark, which this daemon's own drain calls
+# also advance while away, so trusting it here would float this floor past
+# events nobody actually presented.
 status_seen_offset() {  # <state> <task>
   local private shared
   private=$(status_presentation_marker_offset "$(_seen_status_path "$1" "$2")" "$1/$2.status")
-  shared=$(status_presentation_cursor_offset "$1/$2.status" 2>/dev/null) || shared=0
+  shared=$(status_presentation_cursor_offset "$1/$2.status" committed-only 2>/dev/null) || shared=0
   case "$private" in ''|*[!0-9]*) private=0 ;; esac
   case "$shared" in ''|*[!0-9]*) shared=0 ;; esac
   if [ "$shared" -gt "$private" ]; then printf '%s' "$shared"; else printf '%s' "$private"; fi

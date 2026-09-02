@@ -847,8 +847,16 @@ status_presentation_snapshot() {  # <state>
   done
 }
 
-status_presentation_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task offset ident extra cur_ident size legacy
+# <committed-only>, when passed as "committed-only", skips the legacy
+# open-decisions-cursor seed below and reads 0 for a task with no fleet
+# manifest row. That seed exists to migrate a pre-manifest install's prior
+# scan progress into an initial presentation offset; it is not itself proof
+# of a presentation, since the same file is also the OPEN DECISIONS fold's
+# own scan bookmark and advances on every fold regardless of who reads the
+# fold's output. A caller that needs "has this actually been committed as
+# presented" rather than "best available seed" must ask for committed-only.
+status_presentation_cursor_offset() {  # <status-file> [committed-only]
+  local f=$1 committed_only=${2:-} state task manifest data row_task offset ident extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -875,6 +883,9 @@ EOF
       return 0
     fi
     ident=$cur_ident
+  elif [ "$committed_only" = committed-only ]; then
+    printf '0'
+    return 0
   else
     legacy=$(_fm_open_decisions_cursor_path "$f")
     if [ -e "$legacy" ] || [ -L "$legacy" ]; then
