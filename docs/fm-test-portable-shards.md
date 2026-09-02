@@ -55,36 +55,40 @@ Membership is derived rather than enumerated, so a newly added test lands here b
 
 ## Portable serial CI shards
 
-On green CI run [30725985757](https://github.com/kunchenguid/firstmate/actions/runs/30725985757), that remainder accumulated 19m04s of script time against a 20-minute job timeout.
-On [PR 1495](https://github.com/kunchenguid/firstmate/pull/1495), its main step ran about 19m51s before the job was cancelled at that boundary.
-`portable-serial-<k>of<n>` splits it across `n` separate CI runners.
+The whole remainder outgrew a single 20-minute runner, so `portable-serial-<k>of<n>` splits it across `n` separate CI runners.
 Each shard is still strictly serial in itself, and separate runners mean no two of these stateful scripts ever share a machine, so the split needs no concurrency isolation proof.
 
 `bin/fm-test-run.sh` owns `n` and refuses any lane whose `of<n>` disagrees with it.
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
-The hints came from the `fm-test-timing-portable-serial-*` artifacts of green CI run [32491999845](https://github.com/kunchenguid/firstmate/actions/runs/32491999845) on 2026-08-21, where the lane ran 116 scripts in 2541548 ms of serial work.
-`tests/fm-tool-update-check.test.sh` did not exist on that run, so its 12846 ms hint comes from the shard 3 artifact of run [32461816719](https://github.com/kunchenguid/firstmate/actions/runs/32461816719), which is the first run that measured it.
-A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
+The hints are the longest run of each script across the `fm-test-timing-portable-serial-*` artifacts of four consecutive green `main` CI runs on 2026-09-01: [33576211441](https://github.com/milesibastos/firstmate/actions/runs/33576211441), [33573686506](https://github.com/milesibastos/firstmate/actions/runs/33573686506), [33571886334](https://github.com/milesibastos/firstmate/actions/runs/33571886334), and [33569567924](https://github.com/milesibastos/firstmate/actions/runs/33569567924).
+Those runs measured the same 141 scripts, totalling 60.9 minutes of serial work on average and 64.9 minutes when each script takes its slowest observed run.
+Sharding against the per-script maximum rather than the mean packs each shard for a slow runner rather than a lucky one; the same four runs show about two minutes of spread on a single shard's wall clock.
+A script with no hint gets the `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default, which tracks the measured per-script mean.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
-Balance is still worth keeping current, because enough unmeasured scripts let one shard carry more than twice another shard's real work and reach the job cap while another runner sits idle.
+
+Stale hints are still what put a shard against its cap, and they go stale in two ways at once.
+Between 2026-08-21 and 2026-09-01 the lane grew from 42.4 minutes of measured work to 64.9 minutes across 141 scripts.
+Eighteen of those scripts had no hint at all and were packed at the default: `tests/fm-backlog-atomicity.test.sh` alone really costs 121 s.
+Hinted scripts also drifted, `tests/fm-public-followup.test.sh` from 36 s to 204 s.
+Together that let shard 3 reach 19m19s of a 20-minute cap on a green run while shard 2 finished in 12m09s, and shard 4 cross the cap outright on two branches the same night.
 Refresh the hints whenever the serial lane gains scripts, rather than waiting for a shard to time out.
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of4` | 29 | 638602 ms (~638.6 s) |
-| `portable-serial-2of4` | 28 | 638594 ms (~638.6 s) |
-| `portable-serial-3of4` | 30 | 638607 ms (~638.6 s) |
-| `portable-serial-4of4` | 30 | 638591 ms (~638.6 s) |
-| imbalance | | 16 ms |
+| `portable-serial-1of4` | 35 | 973 s (~16.2 min) |
+| `portable-serial-2of4` | 36 | 973 s (~16.2 min) |
+| `portable-serial-3of4` | 35 | 973 s (~16.2 min) |
+| `portable-serial-4of4` | 35 | 973 s (~16.2 min) |
+| imbalance | | under 1 s |
 
-The single longest script, `tests/fm-pr-check-security.test.sh` at 250417 ms, is the floor for any shard count.
+The single longest script, `tests/fm-watch-triage.test.sh` at 258 s, is the floor for any shard count.
 
 Refresh the hints by downloading the per-shard timing artifacts from a green CI run, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs, and updating the table above:
 
 ```sh
-gh run download <run-id> -R kunchenguid/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
+gh run download <run-id> -R milesibastos/firstmate --pattern 'fm-test-timing-portable-serial-*' -D /tmp/fm-serial
 jq -r '.scripts[] | [.path, .duration_ms] | @tsv' /tmp/fm-serial/*.json | LC_ALL=C sort
 bin/fm-test-run.sh --check-coverage
 ```
