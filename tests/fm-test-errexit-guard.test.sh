@@ -58,3 +58,36 @@ assert_grep 'not ok - errexit leaked out of sample_test' "$TMP_ROOT/leaked.err" 
 assert_not_contains "$leaked_out" 'ok - sample test reported' \
   "the leaking suite still reported its test as passing"
 pass "an injected errexit leak is refused and names the test that leaked it"
+
+# The allowlist is the only reason this check could land while suites that
+# predate it are still being fixed, so its bypass needs the same proof the
+# refusal got: a suite named on the list must leak WITHOUT being refused.
+# Take the name from the live list rather than hard-coding one, so removing an
+# entry cannot leave this test asserting against a name nobody carries any more.
+listed_suite=$(printf '%s\n' "$FM_TEST_ERREXIT_LEAK_ALLOWLIST" | awk 'NF { print; exit }')
+listed_suite=${listed_suite%%:*}
+if [ -n "$listed_suite" ]; then
+  write_probe "$TMP_ROOT/$listed_suite" 'set -e'
+  listed_out=$(bash "$TMP_ROOT/$listed_suite" 2> "$TMP_ROOT/listed.err")
+  listed_rc=$?
+  expect_code 0 "$listed_rc" "an allowlisted suite was refused for a leak it is still listed for"
+  assert_contains "$listed_out" 'ok - sample test reported' "the allowlisted suite did not report its test"
+  assert_no_grep 'errexit leaked out of' "$TMP_ROOT/listed.err" \
+    "the allowlisted suite was still told its leak was fatal"
+  pass "a suite still on the allowlist keeps running while its leak is worked off"
+else
+  pass "the allowlist is empty, so every suite is held to the check"
+fi
+
+# The list is only meaningful while every name on it is a suite that exists. A
+# renamed or deleted suite must not leave an entry behind quietly protecting
+# nothing, because the list is the record of how much work is left.
+missing=
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  [ -f "$ROOT/tests/${entry%%:*}" ] || missing="$missing ${entry%%:*}"
+done <<ALLOWLIST
+$FM_TEST_ERREXIT_LEAK_ALLOWLIST
+ALLOWLIST
+[ -z "$missing" ] || fail "the errexit allowlist names suites that no longer exist:$missing"
+pass "every allowlisted suite still exists"
