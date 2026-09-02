@@ -107,13 +107,13 @@ The measured column is the first green seven-shard run, [33585388230](https://gi
 
 Balancing hint sums does not make observed walls equal: that run spread 6.0 to 10.3 minutes against a flat 9.3-minute projection.
 The gap is runner speed, not packing error, and it is why the sizing rule leaves half the cap free rather than trimming to the projection.
-It also means a single shard drifts past the 10-minute trigger below on ordinary variance; the refresh step there is what tells that apart from real growth.
+That spread is also what the re-shard trigger below is sized against, so it reports growth rather than a busy machine.
 
 The single longest script, `tests/fm-watch-triage.test.sh` at 258 s, is the floor for any shard count.
 
 ### Re-shard trigger
 
-Re-shard when any shard's measured script time passes 10 minutes, rather than when a shard times out.
+Re-shard when any shard's measured script time passes 12 minutes, rather than when a shard times out.
 Check it against any green run's own artifacts:
 
 ```sh
@@ -121,7 +121,20 @@ gh run download <run-id> -R milesibastos/firstmate --pattern 'fm-test-timing-por
 jq -r '[.scripts[].duration_ms]|add/60000' /tmp/fm-serial/*.json
 ```
 
-Refresh the hints first, since a shard is only over the threshold once its packing is honest; raise `PORTABLE_SERIAL_SHARDS` if the slowest shard is still over 10 minutes afterwards.
+The two numbers here are deliberately different, and the gap between them is the point.
+Sizing targets 10 minutes because that is where a fresh split should land, with half the cap still free; the trigger sits at 12 because that is where drift becomes real rather than noisy.
+Collapsing them into one number would either re-shard on every busy runner or wait until there is no room left to act.
+
+Twelve is placed above the observed noise, not at the 9.3-minute balance target.
+A healthy seven-shard run already spreads 6.0 to 10.3 minutes on identical packing, so a threshold inside that spread would fire on a slow runner and send someone looking for growth that never happened.
+Sizing it that way is the point: this lane's original defect was a shard crossing its ceiling because the machine was busy, and the expensive part was two people reading a loaded box as a real event.
+A signal that cries wolf under load is worse than none, because load is the only time it speaks.
+
+Twelve leaves the trigger useful in both directions.
+It sits 1.7 minutes above the slowest healthy shard yet still fires once the lane grows about 16%, which is far enough below the 20-minute cap to leave eight minutes of room to act.
+It is also not tuned to look good: on the four-shard layout this change replaced, 15 of 16 measured shard-runs were at or above 12 minutes, so the same trigger would have caught the original failure long before it timed out.
+
+When it fires, refresh the hints before raising the count, since a shard is only honestly over the threshold once its packing is current; raise `PORTABLE_SERIAL_SHARDS` if the slowest shard is still over 12 minutes afterwards.
 
 Refresh the hints by downloading the per-shard timing artifacts from a green CI run, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs, and updating the table above:
 
