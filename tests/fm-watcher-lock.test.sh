@@ -1597,6 +1597,69 @@ test_identity_survives_the_recorded_process_exec() {
   pass "a recorded identity still proves the process after it replaces its command"
 }
 
+# fm_pid_identity's /proc branch hex-encodes the cmdline with od; the ps form
+# needs no such tool. A host, or a restricted PATH, without od must therefore
+# still yield an identity by falling through - because a caller that receives NO
+# identity cannot prove anything, and every proof-required site then silently
+# skips the work it exists to do. That is what stopped teardown reaping a leaked
+# process group on Linux: tests/fm-teardown.test.sh's lsof-absent fixture builds
+# an allowlisted PATH carrying ps but not od.
+#
+# FM_PROC_ROOT_OVERRIDE is what makes this portable. It drives the /proc branch
+# on hosts that have no real /proc, so the fallback is pinned on every platform
+# CI runs rather than only where the bug happened to reproduce.
+test_identity_falls_back_when_od_is_unavailable() {
+  local dir state child proc_root path_no_od out_without out_with cmd resolved
+  dir=$(make_case identity-od-absent)
+  state="$dir/state"
+  mkdir -p "$state"
+
+  sleep 30 &
+  child=$!
+
+  proc_root="$dir/proc"
+  mkdir -p "$proc_root/$child"
+  printf '%s (sleep) S 1 %s %s 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 987654 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' \
+    "$child" "$child" "$child" > "$proc_root/$child/stat"
+  printf 'sleep\0' > "$proc_root/$child/cmdline"
+
+  path_no_od="$dir/path-no-od"
+  mkdir -p "$path_no_od"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find grep head id ln \
+    mkdir mktemp mv ps readlink realpath rm sed sh sleep sort stat tail tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_no_od/$cmd" ;; esac
+  done
+  if PATH="$path_no_od" command -v od >/dev/null 2>&1; then
+    kill "$child" 2>/dev/null || true
+    fail "the od-absent fixture PATH still exposes od, so this case would be vacuous"
+  fi
+
+  # Anti-vacuity: with od present the SAME fixture must take the /proc branch and
+  # emit the proc form. Without this, a fallback that never entered /proc at all
+  # would still satisfy the assertion below.
+  out_with=$(FM_PROC_ROOT_OVERRIDE="$proc_root" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$child") \
+    || out_with=""
+  case "$out_with" in
+    *starttime=987654*cmdline-hex=*) ;;
+    *) kill "$child" 2>/dev/null || true
+       fail "the fixture did not exercise the /proc branch with od present: '$out_with'" ;;
+  esac
+
+  out_without=$(PATH="$path_no_od" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$child") || out_without=""
+  kill "$child" 2>/dev/null || true
+  wait "$child" 2>/dev/null || true
+
+  [ -n "$out_without" ] \
+    || fail "no identity at all was produced without od; every proof-required caller would silently skip its work"
+  case "$out_without" in
+    *cmdline-hex=*) fail "expected the ps fallback without od, got the proc form: '$out_without'" ;;
+  esac
+
+  pass "an identity is still produced when od is unavailable to the /proc branch"
+}
+
 test_lock_unprovable_identity_is_not_stolen() {
   local dir state lockdir holder fakebin no_proc probe out
   dir=$(make_case lock-unprovable-identity)
@@ -1690,6 +1753,7 @@ test_lock_identity_key_label_does_not_veto_a_held_lock
 test_lock_stale_record_with_identity_and_no_process_is_reclaimed
 test_identity_predicate_separates_held_from_proved
 test_identity_survives_the_recorded_process_exec
+test_identity_falls_back_when_od_is_unavailable
 test_lock_unprovable_identity_is_not_stolen
 test_lock_without_recorded_identity_is_not_stolen
 test_lock_empty_pid_uses_minimum_grace
