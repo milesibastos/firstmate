@@ -472,6 +472,19 @@ fm_identity_start_component() {
 # measured full pid-space wrap of 65 to 90 seconds - about a 75x margin on the
 # weaker of the two platforms.
 #
+# TZ CAVEAT, pre-existing and NOT fixed here. The portable ps fallback's lstart
+# (fm_pid_identity above) renders under the checker's inherited TZ, which is
+# not pinned the way LC_ALL is, so two processes reading the same live holder
+# under different TZ settings compute different start-time components. That
+# matters more after this change than before: start time now DECIDES this
+# verdict, and the comparison runs at every lock acquire rather than the four
+# identity call sites it used to, so a TZ mismatch would evict a live holder -
+# the too-strict direction this whole change exists to avoid. Not fixed here
+# because pinning TZ would change what fm_pid_identity emits, and identities
+# already recorded by running processes and by locks already held in live
+# homes must keep matching what new code computes; that needs its own
+# migration, not a quiet edit.
+#
 # The two unproven-but-held verdicts fail SAFE toward the current holder.
 # Refusing to steal a lock whose ownership cannot be disproved leaves recovery
 # waiting; claiming an identity that was never established produces two owners
