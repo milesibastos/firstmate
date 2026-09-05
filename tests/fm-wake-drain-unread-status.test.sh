@@ -211,6 +211,176 @@ test_snapshot_does_not_ack_a_later_append() {
   pass "presentation cursor advances only through its captured endpoint"
 }
 
+test_unprinted_terminal_line_blocks_the_presentation_cursor() {
+  local dir state out status remaining event
+  dir=$(make_case terminal-blocks-cursor)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-block.status"
+  prime_cursor "$state" "$status"
+
+  # The reported loss shape: an unread note: immediately followed by an unread
+  # done:, with no signal record presenting this task in full. Only the note: is
+  # printed on this path, so advancing the cursor through the done: would publish
+  # a cursor asserting a presentation that never happened.
+  printf 'note: captain answer worth printing\n' >> "$status"
+  printf 'done: lock acquire path now proves holder identity\n' >> "$status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on the note-then-done shape"
+
+  grep -F 'task-block note: captain answer worth printing' "$out" >/dev/null \
+    || fail "the unread note was not surfaced: $(cat "$out")"
+  if grep -F 'done: lock acquire path now proves holder identity' "$out" >/dev/null; then
+    fail "the drain printed a terminal line this path does not surface: $(cat "$out")"
+  fi
+
+  # The done: must stay classifiable from the published cursor, because a
+  # supervisor that floors its scan position there is the consumer that would
+  # otherwise never read it again.
+  remaining=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_new_lines_since_cursor "$2/task-block.status"
+  ' _ "$ROOT" "$state") || fail "could not read the unread span after the drain"
+  case "$remaining" in
+    *'done: lock acquire path now proves holder identity'*) ;;
+    *) fail "the cursor advanced past a done: nothing presented: $remaining" ;;
+  esac
+
+  event=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_span_first_actionable "$2/task-block.status" \
+      "$(status_presentation_cursor_offset "$2/task-block.status")"
+  ' _ "$ROOT" "$state") \
+    || fail "no actionable event remained ahead of the published cursor"
+  [ "$event" = 'done: lock acquire path now proves holder identity' ] \
+    || fail "a supervisor flooring at the published cursor would not classify the done: $event"
+
+  pass "a captain-relevant line the drain never printed blocks the presentation cursor"
+}
+
+test_malformed_decision_key_blocks_the_presentation_cursor() {
+  local dir state out status remaining event line
+  dir=$(make_case malformed-decision-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-badkey.status"
+  prime_cursor "$state" "$status"
+
+  # A malformed [key=...] slug makes _fm_decision_key fail, so this line never
+  # enters the OPEN DECISIONS fold and has no standing surface of its own.
+  line='needs-decision [key=BAD KEY!]: pick A or B'
+  printf 'note: captain answer worth printing\n' >> "$status"
+  printf '%s\n' "$line" >> "$status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on the malformed-key decision shape"
+
+  grep -F 'task-badkey note: captain answer worth printing' "$out" >/dev/null \
+    || fail "the unread note was not surfaced: $(cat "$out")"
+  if grep -F 'pick A or B' "$out" >/dev/null; then
+    fail "the drain printed a decision line this path does not surface: $(cat "$out")"
+  fi
+
+  remaining=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_new_lines_since_cursor "$2/task-badkey.status"
+  ' _ "$ROOT" "$state") || fail "could not read the unread span after the drain"
+  case "$remaining" in
+    *"$line"*) ;;
+    *) fail "the cursor advanced past a malformed-key decision nothing presented: $remaining" ;;
+  esac
+
+  event=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_span_first_actionable "$2/task-badkey.status" \
+      "$(status_presentation_cursor_offset "$2/task-badkey.status")"
+  ' _ "$ROOT" "$state") \
+    || fail "no actionable event remained ahead of the published cursor"
+  [ "$event" = "$line" ] \
+    || fail "a supervisor flooring at the published cursor would not classify the decision: $event"
+
+  pass "a malformed-key needs-decision line the fold cannot carry blocks the presentation cursor"
+}
+
+test_reserved_key_rejected_decision_blocks_the_presentation_cursor() {
+  local dir state out status remaining event line
+  dir=$(make_case reserved-key-rejected-decision)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-badns.status"
+  prime_cursor "$state" "$status"
+
+  # The key claims the reserved pending-reply namespace but the note does not
+  # speak it, so _fm_decision_key_transition_allowed rejects the transition and
+  # the fold never opens it.
+  line='needs-decision [key=pending-reply-x9]: pick A or B'
+  printf 'note: captain answer worth printing\n' >> "$status"
+  printf '%s\n' "$line" >> "$status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on the reserved-key-rejected decision shape"
+
+  grep -F 'task-badns note: captain answer worth printing' "$out" >/dev/null \
+    || fail "the unread note was not surfaced: $(cat "$out")"
+  if grep -F 'pick A or B' "$out" >/dev/null; then
+    fail "the drain printed a decision line this path does not surface: $(cat "$out")"
+  fi
+
+  remaining=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_new_lines_since_cursor "$2/task-badns.status"
+  ' _ "$ROOT" "$state") || fail "could not read the unread span after the drain"
+  case "$remaining" in
+    *"$line"*) ;;
+    *) fail "the cursor advanced past a reserved-key-rejected decision nothing presented: $remaining" ;;
+  esac
+
+  event=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_span_first_actionable "$2/task-badns.status" \
+      "$(status_presentation_cursor_offset "$2/task-badns.status")"
+  ' _ "$ROOT" "$state") \
+    || fail "no actionable event remained ahead of the published cursor"
+  [ "$event" = "reconciliation-required: $line" ] \
+    || fail "a supervisor flooring at the published cursor would not classify the decision: $event"
+
+  pass "a reserved-key decision the fold rejects blocks the presentation cursor"
+}
+
+test_well_formed_keyed_decision_stays_exempt_from_the_presentation_cursor() {
+  local dir state out second status remaining
+  dir=$(make_case well-formed-keyed-decision)
+  state="$dir/state"
+  out="$dir/first.out"
+  second="$dir/second.out"
+  status="$state/task-goodkey.status"
+  prime_cursor "$state" "$status"
+
+  printf 'note: captain answer worth printing\n' >> "$status"
+  printf 'needs-decision [key=release]: choose target\n' >> "$status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on the well-formed keyed decision shape"
+
+  grep -F 'task-goodkey note: captain answer worth printing' "$out" >/dev/null \
+    || fail "the unread note was not surfaced: $(cat "$out")"
+  grep -F 'task-goodkey [key=release] needs-decision: choose target' "$out" >/dev/null \
+    || fail "the well-formed decision did not surface through OPEN DECISIONS: $(cat "$out")"
+
+  remaining=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-classify-lib.sh"
+    status_new_lines_since_cursor "$2/task-goodkey.status"
+  ' _ "$ROOT" "$state") || fail "could not read the unread span after the drain"
+  [ -z "$remaining" ] \
+    || fail "the cursor did not advance through a well-formed keyed decision it was meant to stay exempt for: $remaining"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$second" || fail "second drain failed"
+  if grep -F 'captain answer worth printing' "$second" >/dev/null; then
+    fail "the already-presented note was replayed after the decision advanced the cursor: $(cat "$second")"
+  fi
+  grep -F 'task-goodkey [key=release] needs-decision: choose target' "$second" >/dev/null \
+    || fail "OPEN DECISIONS stopped carrying the still-open keyed decision: $(cat "$second")"
+
+  pass "a well-formed keyed decision stays exempt from the cursor block and still advances the cursor"
+}
+
 test_retired_task_id_starts_new_status_unread() {
   local dir state out offset event old_ident
   dir=$(make_case retired-task-reuse)
@@ -371,6 +541,10 @@ test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
 test_snapshot_does_not_ack_a_later_append
+test_unprinted_terminal_line_blocks_the_presentation_cursor
+test_malformed_decision_key_blocks_the_presentation_cursor
+test_reserved_key_rejected_decision_blocks_the_presentation_cursor
+test_well_formed_keyed_decision_stays_exempt_from_the_presentation_cursor
 test_retired_task_id_starts_new_status_unread
 test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible

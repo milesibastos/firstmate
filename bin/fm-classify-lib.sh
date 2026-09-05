@@ -847,8 +847,16 @@ status_presentation_snapshot() {  # <state>
   done
 }
 
-status_presentation_cursor_offset() {  # <status-file>
-  local f=$1 state task manifest data row_task offset ident extra cur_ident size legacy
+# <committed-only>, when passed as "committed-only", skips the legacy
+# open-decisions-cursor seed below and reads 0 for a task with no fleet
+# manifest row. That seed exists to migrate a pre-manifest install's prior
+# scan progress into an initial presentation offset; it is not itself proof
+# of a presentation, since the same file is also the OPEN DECISIONS fold's
+# own scan bookmark and advances on every fold regardless of who reads the
+# fold's output. A caller that needs "has this actually been committed as
+# presented" rather than "best available seed" must ask for committed-only.
+status_presentation_cursor_offset() {  # <status-file> [committed-only]
+  local f=$1 committed_only=${2:-} state task manifest data row_task offset ident extra cur_ident size legacy
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
   state=${f%/*}
   task=${f##*/}; task=${task%.status}
@@ -875,6 +883,9 @@ EOF
       return 0
     fi
     ident=$cur_ident
+  elif [ "$committed_only" = committed-only ]; then
+    printf '0'
+    return 0
   else
     legacy=$(_fm_open_decisions_cursor_path "$f")
     if [ -e "$legacy" ] || [ -L "$legacy" ]; then
@@ -1096,7 +1107,7 @@ EOF
 }
 
 status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<fully-presented-task-ids>]
-  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe
+  local state=$1 snapshot=$2 fully_presented=${3:-} task endpoint ident f offset lines line safe blocked key
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     safe=false
@@ -1112,16 +1123,46 @@ $fully_presented
       # lines remain unacknowledged only while they are the sole unread content,
       # preserving delayed signal annotations without replaying a handled note
       # that happened to follow a routine line.
+      # A TERMINAL captain-relevant line this drain never printed blocks that
+      # advance outright, because advancing through it would publish a cursor
+      # asserting a presentation that never happened, and a consumer that floors
+      # a scan position on this cursor would then never classify it at all.
+      # Holding the cursor re-presents this span's surface lines on a later drain
+      # instead: a duplicate rather than a lost event, and it clears as soon as a
+      # signal annotation presents that task in full through fully_presented.
+      # `needs-decision` and `blocked` lines are deliberately exempt only when
+      # they actually enter the OPEN DECISIONS fold (the same
+      # _fm_decision_key / _fm_decision_key_transition_allowed gate
+      # _fm_decision_fold_line applies). They are not printed here either,
+      # but OPEN DECISIONS is a standing surface that re-prints a folded
+      # decision on every drain until the fold proves it closed, so the
+      # cursor passing it loses nothing. A needs-decision/blocked line the
+      # fold itself skips (malformed key, or a reserved key whose note
+      # doesn't speak that namespace) has no such standing surface, so it is
+      # treated like any other terminal event: its one-shot presentation is
+      # the only one it ever gets.
+      blocked=false
       while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
           *[![:space:]]*)
-            if status_line_is_unread_surface "$line"; then safe=true; break; fi
+            if status_line_is_unread_surface "$line"; then safe=true; continue; fi
+            status_is_captain_relevant "$line" || continue
+            case "$(status_line_verb "$line")" in
+              needs-decision|blocked)
+                if key=$(_fm_decision_key "$line") \
+                  && _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")"; then
+                  continue
+                fi
+                ;;
+            esac
+            blocked=true
+            break
             ;;
         esac
       done <<EOF
 $lines
 EOF
-      if [ "$safe" = false ]; then endpoint=$offset; fi
+      if [ "$safe" = false ] || [ "$blocked" = true ]; then endpoint=$offset; fi
     fi
     printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" || return 1
   done <<EOF
